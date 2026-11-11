@@ -132,7 +132,8 @@ def cmd_admin(con, chat, u, texto):
 def lista_con_botones(inicio, mensaje, fichas):
     lineas, botones = [inicio + e(mensaje)], []
     for i, f in enumerate(fichas, 1):
-        datos = " · ".join(x for x in (f["cliente"], f["anio"], f["idiomas"]) if x)
+        fecha = f.get("anio") or (f.get("fecha") or "")[:7]
+        datos = " · ".join(x for x in (f["cliente"], fecha, f["idiomas"]) if x)
         lineas.append(f"\n<b>{i}. {e(f['titulo'])}</b>\n<i>{e(datos)}</i>")
         botones.append([{"text": f"📥 {i}. {f['titulo'][:40]}", "callback_data": f"d:{f['grupo']}"}])
     return "\n".join(lineas)[:4000], botones

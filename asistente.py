@@ -20,7 +20,7 @@ MAX_VUELTAS = int(os.getenv("BOT_MAX_BUSQUEDAS", "4"))
 MINUTOS_MEMORIA = int(os.getenv("BOT_MINUTOS_MEMORIA", "60"))
 TURNOS_MEMORIA = int(os.getenv("BOT_TURNOS_MEMORIA", "6"))
 
-SYSTEM = """Eres el asistente del buscador interno de dossieres de alegria-activity, una agencia de marketing \
+SYSTEM_BASE = """Eres el asistente del buscador interno de dossieres de alegria-activity, una agencia de marketing \
 experiencial que hace campañas y exposiciones itinerantes en vehículos (caravanas, furgones, camiones, \
 semirremolques, autobuses, plataformas), stands y unidades móviles para marcas y administraciones públicas.
 
@@ -37,6 +37,11 @@ Puedes hacer varias búsquedas.
 3. Elige los que mejor encajan (como mucho 5, mejor 2 o 3 si son claros) y termina SIEMPRE llamando a \
 mostrar_dossieres, con un mensaje breve que explique por qué encaja cada uno, en el mismo orden.
 
+Fechas:
+- Cada ficha trae "anio" (si el dossier lo dice) y "fecha" (última modificación del archivo en Box, AAAA-MM-DD). Para saber si un dossier es reciente usa "anio" si está y, si no, "fecha". Ojo: algunas fechas de Box son de cuando se movieron archivos en bloque, así que son aproximadas.
+- Si piden "el último", "el más reciente", "la última versión" o algo "actual" de un tema, cliente o sector, busca con orden "recientes" y dilo con la fecha ("es de marzo de 2026"). Si hay varias versiones del mismo dossier, el botón descarga la más reciente en castellano; las demás aparecen en "archivos".
+- Para "de los últimos años", "antes de 2020", etc., usa anio_desde / anio_hasta.
+
 Reglas:
 - Recomienda solo dossieres que hayan salido en tus búsquedas. Nunca inventes dossieres, clientes ni datos.
 - Si nada encaja de verdad, dilo con claridad, enseña lo más cercano si sirve y sugiere cómo afinar.
@@ -46,6 +51,12 @@ Reglas:
 - Tono cercano y directo, en castellano. Mensajes cortos: se leen en el móvil. Sin saludos (el bot ya saluda), \
 sin markdown ni asteriscos; texto plano.
 - Si te piden algo que no es buscar dossieres, explica brevemente que solo ayudas con eso."""
+
+
+
+def system_hoy():
+    return SYSTEM_BASE + f"\n\nHoy es {time.strftime('%Y-%m-%d')}."
+
 
 HERRAMIENTAS = [
     {
@@ -57,14 +68,17 @@ HERRAMIENTAS = [
             "type": "object",
             "properties": {
                 "consulta": {"type": "string", "description": "Palabras clave (p. ej. 'salud mental Airstream', "
-                                                              "'bibliobús', 'oficina bancaria móvil')"},
+                                                              "'bibliobús', 'oficina bancaria móvil'). Vacío "
+                                                              "con orden 'recientes' = los últimos de todo el archivo"},
+                "orden": {"type": "string", "enum": ["relevancia", "recientes"],
+                          "description": "relevancia (por defecto) o recientes: los más nuevos primero"},
                 "cliente": {"type": "string", "description": "Opcional: filtra por cliente (texto parcial)"},
                 "idioma": {"type": "string", "description": "Opcional: castellano, inglés, francés, polaco..."},
                 "anio_desde": {"type": "integer", "description": "Opcional: año mínimo"},
                 "anio_hasta": {"type": "integer", "description": "Opcional: año máximo"},
                 "limite": {"type": "integer", "description": "Máximo de resultados (por defecto 8, máximo 15)"},
             },
-            "required": ["consulta"],
+            "required": [],
         },
     },
     {
@@ -121,22 +135,38 @@ def _anio(valor):
     return int(m.group(0)) if m else None
 
 
-def buscar(con, consulta, cliente_=None, idioma=None, anio_desde=None, anio_hasta=None, limite=8):
+def fecha_de(con, grupo):
+    r = con.execute("SELECT MAX(modificado) FROM archivos WHERE grupo = ? AND activo = 1", (grupo,)).fetchone()[0]
+    return (r or "")[:10]
+
+
+def anio_efectivo(f):
+    return _anio(f.get("anio")) or _anio(f.get("fecha"))
+
+
+def buscar(con, consulta, cliente_=None, idioma=None, anio_desde=None, anio_hasta=None, limite=8,
+           orden="relevancia"):
     limite = max(1, min(int(limite or 8), 15))
-    filas = db.buscar(con, consulta, 60 if (cliente_ or idioma or anio_desde or anio_hasta) else limite)
+    recientes = orden == "recientes"
+    filtros = bool(cliente_ or idioma or anio_desde or anio_hasta)
+    if (consulta or "").strip():
+        filas = db.buscar(con, consulta, 80 if (filtros or recientes) else limite)
+    else:   # sin palabras: todo el archivo (tiene sentido con orden "recientes" o filtros)
+        filas = [dict(f) for f in con.execute("SELECT * FROM fichas")]
     salida = []
     for f in filas:
+        f["fecha"] = fecha_de(con, f["grupo"])
         if cliente_ and db.sin_tildes(cliente_).lower() not in db.sin_tildes(f["cliente"] or "").lower():
             continue
         if idioma and db.sin_tildes(idioma).lower()[:4] not in db.sin_tildes(f["idiomas"] or "").lower():
             continue
-        a = _anio(f["anio"])
+        a = anio_efectivo(f)
         if (anio_desde and (a is None or a < anio_desde)) or (anio_hasta and (a is None or a > anio_hasta)):
             continue
         salida.append(f)
-        if len(salida) >= limite:
-            break
-    return salida
+    if recientes:
+        salida.sort(key=lambda f: (anio_efectivo(f) or 0, f["fecha"]), reverse=True)
+    return salida[:limite]
 
 
 def _ficha_breve(con, f):
@@ -145,7 +175,8 @@ def _ficha_breve(con, f):
         "grupo": f["grupo"], "titulo": f["titulo"], "cliente": f["cliente"], "campana": f["campana"],
         "anio": f["anio"], "idiomas": f["idiomas"], "vehiculos": f["vehiculos"], "formato": f["formato"],
         "tematicas": f["tematicas"], "publico": f["publico"], "resumen": f["resumen"],
-        "archivos": [a["nombre"] for a in archivos][:4],
+        "fecha": f.get("fecha") or fecha_de(con, f["grupo"]),
+        "archivos": [f"{a['nombre']} ({(a['modificado'] or '')[:10]})" for a in archivos][:4],
     }
 
 
@@ -156,7 +187,7 @@ def responder(con, uid, pregunta):
     for vuelta in range(MAX_VUELTAS + 1):
         r = cliente().messages.create(
             model=MODELO, max_tokens=1200,
-            system=[{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
+            system=[{"type": "text", "text": system_hoy(), "cache_control": {"type": "ephemeral"}}],
             tools=HERRAMIENTAS,
             tool_choice={"type": "auto"},   # "auto": algunos modelos no aceptan forzar la herramienta
             messages=mensajes,
@@ -181,7 +212,7 @@ def responder(con, uid, pregunta):
             if b.name == "buscar_dossieres":
                 a = b.input
                 filas = buscar(con, a.get("consulta", ""), a.get("cliente"), a.get("idioma"),
-                               a.get("anio_desde"), a.get("anio_hasta"), a.get("limite"))
+                               a.get("anio_desde"), a.get("anio_hasta"), a.get("limite"), a.get("orden"))
                 fichas = [_ficha_breve(con, f) for f in filas]
                 for f in fichas:
                     vistos[f["grupo"]] = f

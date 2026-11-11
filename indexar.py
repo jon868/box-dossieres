@@ -294,8 +294,10 @@ def cmd_agrupar(_args):
     for miembros in grupos.values():
         clave = min(m["clave"] for m in miembros)
         grupo = "g" + hashlib.sha1(clave.encode()).hexdigest()[:12]
-        # descarga por defecto: castellano (o sin idioma marcado), versión "baja" si la hay, la más ligera
+        # descarga por defecto: castellano (o sin idioma marcado), la versión más reciente (por día),
+        # y entre las del mismo día la "baja" o la más ligera
         orden = sorted(miembros, key=lambda m: (m["idioma"] not in ("", "castellano"),
+                                                 "".join(chr(255 - ord(c)) for c in (m["modificado"] or "")[:10]),
                                                  "baja" not in m["nombre"].lower(), m["tamano"]))
         for m in miembros:
             con.execute("UPDATE archivos SET grupo = ?, idioma = ?, preferido = ? WHERE id = ?",
