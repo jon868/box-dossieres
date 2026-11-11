@@ -26,7 +26,7 @@ import os
 import re
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
@@ -339,7 +339,7 @@ def peticion(con, grupo, miembros):
         "custom_id": grupo,
         "params": {
             "model": MODELO,
-            "max_tokens": 1500,
+            "max_tokens": 3000,
             "system": [{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
             "tools": [HERRAMIENTA],
             # "auto" como en box-etiquetar: algunos modelos no aceptan forzar la herramienta.
@@ -439,12 +439,17 @@ def cmd_recoger(_args):
     pin, pout = PRECIOS_BATCH.get(MODELO, (1.0, 5.0))
     ok = err = 0
     coste_total = 0.0
+    motivos = Counter()
     for lid in abiertos:
         for r in cliente.messages.batches.results(lid):
             grupo = r.custom_id
             if r.result.type != "succeeded":
                 err += 1
-                print(f"  {grupo}: {r.result.type}")
+                e = getattr(r.result, "error", None)
+                interno = getattr(e, "error", e)
+                motivo = f"{r.result.type}: {getattr(interno, 'message', interno) or ''}"
+                motivos[motivo[:120]] += 1
+                print(f"  {grupo}: {motivo[:200]}")
                 continue
             msg = r.result.message
             ficha = next((b.input for b in msg.content if b.type == "tool_use"), None)
@@ -457,6 +462,9 @@ def cmd_recoger(_args):
                     ficha = None
             if not ficha:
                 err += 1
+                motivo = f"sin ficha (stop_reason={getattr(msg, 'stop_reason', '?')})"
+                motivos[motivo] += 1
+                print(f"  {grupo}: {motivo}")
                 continue
             u = msg.usage
             tin = u.input_tokens + (u.cache_creation_input_tokens or 0) * 1.25 + (u.cache_read_input_tokens or 0) * 0.1
@@ -475,6 +483,10 @@ def cmd_recoger(_args):
         con.execute("UPDATE lotes SET recogido = 1 WHERE id = ?", (lid,))
         con.commit()
     print(f"{ok} fichas guardadas, {err} con error · coste ≈ {coste_total:.2f} $")
+    for motivo, n in motivos.most_common():
+        print(f"  {n:4d} × {motivo}")
+    if err:
+        print("Los que han fallado se reintentan con: python indexar.py enviar --si")
     reconstruir_buscador(con)
 
 
