@@ -114,7 +114,11 @@ def ahora():
 def confirmar(args, pregunta):
     if getattr(args, "si", False):
         return
-    if input(f"\n{pregunta} [s/N] ").strip().lower() not in ("s", "si", "sí"):
+    try:
+        respuesta = input(f"\n{pregunta} [s/N] ")
+    except (EOFError, OSError):   # sin teclado (nohup, tarea programada)
+        sys.exit("\nNo hay consola para confirmar. Lanza el mismo comando con --si para que no pregunte.")
+    if respuesta.strip().lower() not in ("s", "si", "sí"):
         sys.exit("Cancelado.")
 
 

@@ -44,7 +44,7 @@ python indexar.py buscar "salud mental airstream"
 ```
 O todo seguido y en segundo plano:
 ```bash
-nohup python indexar.py todo --si > /app/datos/indexado.log 2>&1 &
+nohup python indexar.py todo --si > /app/datos/indexado.log 2>&1 &   # con nohup, siempre --si
 tail -f /app/datos/indexado.log
 ```
 Si se corta, relánzalo: reanuda (no repite textos ni fichas ya hechas).
