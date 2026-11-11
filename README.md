@@ -75,6 +75,24 @@ Los administradores son los IDs de `ADMIN_IDS`. Cada búsqueda y descarga queda 
 | `bot.py` | Bot de Telegram: permisos, saludo, búsqueda, descarga e indexado nocturno |
 | `asistente.py` | Claude en el bot: system prompt, herramientas de búsqueda y memoria de la conversación |
 | `uso.py` | Registro de uso, señales implícitas e informes |
+| `servidor.py` | Publica `indice_dossieres.json` (con contraseña) para el conector de Box |
+
+## Buscar dossieres desde Claude Team (conector Box_alegria)
+Además del bot, el índice se puede usar desde Claude con la herramienta `buscar_dossieres` del conector de Box
+y la skill `buscar-dossieres`.
+1. Al recoger las fichas (y al agrupar) se genera `datos/indice_dossieres.json` (fichas y archivos, sin el texto de
+   los PDF). Para rehacerlo a mano: `python indexar.py exportar`.
+2. Con `INDICE_PASSWORD` definida, el servicio lo publica en el puerto 8080:
+   `https://<dominio>/indice_dossieres.json`, con usuario y contraseña (`INDICE_USUARIO` / `INDICE_PASSWORD`).
+   En Easypanel: **Domains** → asigna un dominio con HTTPS al puerto `8080`.
+3. En el servicio del conector (`box-mcp`) añade:
+   ```
+   INDICE_DOSSIERES_URL=https://<dominio>/indice_dossieres.json
+   INDICE_DOSSIERES_USUARIO=alegria
+   INDICE_DOSSIERES_PASSWORD=<la misma contraseña>
+   ```
+   El conector lo recarga cada `INDICE_REFRESCO_MIN` minutos (60 por defecto), como el índice de fotos.
+   Comprobación: `/health/box` del conector muestra `indice_dossieres` con el número de dossieres.
 
 ## Registro de uso y calidad
 Cada respuesta del bot queda registrada con su contexto (pregunta, búsquedas que hizo Claude, dossieres

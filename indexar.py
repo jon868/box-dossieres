@@ -15,6 +15,7 @@ Uso:
   python indexar.py actualizar      Igual que "todo --si" (para la tarea nocturna)
   python indexar.py buscar "texto"  Prueba el buscador desde la consola
   python indexar.py resumen         Cifras del índice
+  python indexar.py exportar        Rehace indice_dossieres.json (para el conector de Box)
 
 Solo LEE de Box. No escribe, mueve ni borra nada allí.
 """
@@ -305,6 +306,8 @@ def cmd_agrupar(_args):
     con.commit()
     varios = sum(len(m) > 1 for m in grupos.values())
     print(f"{len(archivos)} archivos en {len(grupos)} dossieres ({varios} con varias versiones o idiomas).")
+    if con.execute("SELECT COUNT(*) FROM fichas").fetchone()[0]:
+        exportar_indice(con)
 
 
 # ---------------------------------------------------------------- 5. enviar
@@ -513,6 +516,37 @@ def reconstruir_buscador(con):
     con.commit()
     n = con.execute("SELECT COUNT(*) FROM buscador").fetchone()[0]
     print(f"Buscador rehecho: {n} dossieres.")
+    exportar_indice(con)
+
+
+def exportar_indice(con):
+    """indice_dossieres.json para la herramienta buscar_dossieres del conector de Box (Claude Team).
+    Solo fichas y archivos (sin el texto completo de los PDF)."""
+    dossieres = []
+    for f in con.execute("SELECT * FROM fichas ORDER BY grupo").fetchall():
+        archivos = db.archivos_de(con, f["grupo"])
+        if not archivos:
+            continue
+        fechas = [a["modificado"] for a in archivos if a["modificado"]]
+        dossieres.append({
+            "grupo": f["grupo"], "titulo": f["titulo"], "cliente": f["cliente"], "campana": f["campana"],
+            "anio": f["anio"], "fecha": max(fechas)[:10] if fechas else "", "idiomas": f["idiomas"],
+            "vehiculos": f["vehiculos"], "formato": f["formato"], "tematicas": f["tematicas"],
+            "publico": f["publico"], "resumen": f["resumen"], "palabras_clave": f["palabras_clave"],
+            "archivos": [{"id": a["id"], "nombre": a["nombre"], "idioma": a["idioma"] or "castellano",
+                          "mb": round((a["tamano"] or 0) / 1048576, 1), "modificado": (a["modificado"] or "")[:10],
+                          "por_defecto": bool(a["preferido"]), "carpeta": a["ruta"]} for a in archivos],
+        })
+    ruta = db.DATA / "indice_dossieres.json"
+    temporal = ruta.with_suffix(".tmp")
+    temporal.write_text(json.dumps({"generado": ahora(), "version": VERSION, "dossieres": dossieres},
+                                   ensure_ascii=False), encoding="utf-8")
+    temporal.replace(ruta)   # se sustituye de golpe: nunca se sirve un archivo a medias
+    print(f"Índice para el conector: {len(dossieres)} dossieres en {ruta}.")
+
+
+def cmd_exportar(_args):
+    exportar_indice(db.conectar())
 
 
 # ---------------------------------------------------------------- todo / actualizar / buscar
@@ -554,14 +588,15 @@ def cmd_resumen(_args):
 def main():
     p = argparse.ArgumentParser(description="Indexador de dossieres de Box")
     p.add_argument("comando", choices=["listar", "excel", "textos", "agrupar", "enviar", "estado", "recoger",
-                                          "todo", "actualizar", "buscar", "resumen"])
+                                          "todo", "actualizar", "buscar", "resumen", "exportar"])
     p.add_argument("texto", nargs="?", default="", help="con buscar: lo que quieres encontrar")
     p.add_argument("--si", action="store_true", help="no pedir confirmación")
     p.add_argument("--forzar", action="store_true", help="con enviar/todo: rehacer todas las fichas")
     args = p.parse_args()
     {"listar": cmd_listar, "excel": cmd_excel, "textos": cmd_textos, "agrupar": cmd_agrupar,
      "enviar": cmd_enviar, "estado": cmd_estado, "recoger": cmd_recoger, "todo": cmd_todo,
-     "actualizar": cmd_actualizar, "buscar": cmd_buscar, "resumen": cmd_resumen}[args.comando](args)
+     "actualizar": cmd_actualizar, "buscar": cmd_buscar, "resumen": cmd_resumen,
+     "exportar": cmd_exportar}[args.comando](args)
 
 
 if __name__ == "__main__":

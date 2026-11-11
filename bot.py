@@ -26,6 +26,7 @@ load_dotenv()
 import asistente  # noqa: E402
 import box  # noqa: E402
 import db  # noqa: E402
+import servidor  # noqa: E402
 import uso  # noqa: E402
 
 TOKEN = box.entorno("TELEGRAM_TOKEN")
@@ -288,6 +289,8 @@ def main():
     if AUTO_INDEXAR:
         threading.Thread(target=indexado_nocturno, daemon=True).start()
     threading.Thread(target=purga_diaria, daemon=True).start()
+    if servidor.PASSWORD:   # publica indice_dossieres.json para el conector de Box
+        threading.Thread(target=servidor.arrancar, daemon=True).start()
     print("Bot de dossieres en marcha.", flush=True)
     hilos = ThreadPoolExecutor(HILOS)
     offset = None
