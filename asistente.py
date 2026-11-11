@@ -1,0 +1,199 @@
+"""
+Asistente del bot: Claude interpreta la pregunta, busca en el índice de dossieres (las veces que haga falta)
+y ayuda a la persona a dar con el dossier que necesita.
+
+Claude solo ve las fichas que devuelve el buscador: no puede recomendar dossieres que no existan.
+Termina siempre con la herramienta mostrar_dossieres (mensaje + dossieres con botón de descarga).
+"""
+import json
+import os
+import re
+import threading
+import time
+
+import anthropic
+
+import db
+
+MODELO = os.getenv("BOT_MODELO", "claude-haiku-5-5")
+MAX_VUELTAS = int(os.getenv("BOT_MAX_BUSQUEDAS", "4"))
+MINUTOS_MEMORIA = int(os.getenv("BOT_MINUTOS_MEMORIA", "60"))
+TURNOS_MEMORIA = int(os.getenv("BOT_TURNOS_MEMORIA", "6"))
+
+SYSTEM = """Eres el asistente del buscador interno de dossieres de alegria-activity, una agencia de marketing \
+experiencial que hace campañas y exposiciones itinerantes en vehículos (caravanas, furgones, camiones, \
+semirremolques, autobuses, plataformas), stands y unidades móviles para marcas y administraciones públicas.
+
+Hablas por Telegram con compañeros de la agencia (comerciales, producción, diseño) que buscan dossieres \
+comerciales anteriores: para enviarlos a un cliente, inspirarse para una propuesta o recordar qué se hizo.
+
+Cómo trabajas:
+1. Interpreta qué busca la persona: cliente o sector, temática, tipo de acción (exposición itinerante, oficina \
+móvil, aula, stand, roadshow...), vehículo o soporte, público, idioma o época. Las peticiones suelen ser vagas \
+("algo de salud para colegios", "lo de los bancos en Francia"): tradúcelas a búsquedas concretas.
+2. Usa buscar_dossieres. Si los resultados no encajan o son pocos, vuelve a buscar con sinónimos, términos más \
+generales o el sector en vez del cliente (p. ej. "banca", "entidad financiera", "educación financiera"). \
+Puedes hacer varias búsquedas.
+3. Elige los que mejor encajan (como mucho 5, mejor 2 o 3 si son claros) y termina SIEMPRE llamando a \
+mostrar_dossieres, con un mensaje breve que explique por qué encaja cada uno, en el mismo orden.
+
+Reglas:
+- Recomienda solo dossieres que hayan salido en tus búsquedas. Nunca inventes dossieres, clientes ni datos.
+- Si nada encaja de verdad, dilo con claridad, enseña lo más cercano si sirve y sugiere cómo afinar.
+- Si la petición es tan ambigua que no sabes ni por dónde empezar, haz UNA pregunta corta \
+(mostrar_dossieres con la pregunta y sin dossieres). Si puedes buscar algo razonable, busca primero.
+- Describe lo que dice cada dossier; no opines sobre si un vehículo sigue existiendo o está disponible.
+- Tono cercano y directo, en castellano. Mensajes cortos: se leen en el móvil. Sin saludos (el bot ya saluda), \
+sin markdown ni asteriscos; texto plano.
+- Si te piden algo que no es buscar dossieres, explica brevemente que solo ayudas con eso."""
+
+HERRAMIENTAS = [
+    {
+        "name": "buscar_dossieres",
+        "description": "Busca en el índice de dossieres comerciales de la agencia (unos 1.100, de 2016 a hoy). "
+                       "Busca por palabras en título, cliente, campaña, temáticas, vehículos, formato, resumen "
+                       "y texto del dossier. Devuelve fichas resumidas.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "consulta": {"type": "string", "description": "Palabras clave (p. ej. 'salud mental Airstream', "
+                                                              "'bibliobús', 'oficina bancaria móvil')"},
+                "cliente": {"type": "string", "description": "Opcional: filtra por cliente (texto parcial)"},
+                "idioma": {"type": "string", "description": "Opcional: castellano, inglés, francés, polaco..."},
+                "anio_desde": {"type": "integer", "description": "Opcional: año mínimo"},
+                "anio_hasta": {"type": "integer", "description": "Opcional: año máximo"},
+                "limite": {"type": "integer", "description": "Máximo de resultados (por defecto 8, máximo 15)"},
+            },
+            "required": ["consulta"],
+        },
+    },
+    {
+        "name": "mostrar_dossieres",
+        "description": "Respuesta final al usuario: un mensaje y, si hay, los dossieres elegidos (aparecerán con "
+                       "botón de descarga). Llámala siempre para terminar.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "mensaje": {"type": "string", "description": "Texto para el usuario, breve y en texto plano"},
+                "dossieres": {"type": "array", "items": {"type": "string"}, "maxItems": 5,
+                              "description": "IDs ('grupo') de los dossieres recomendados, en orden"},
+            },
+            "required": ["mensaje", "dossieres"],
+        },
+    },
+]
+HERRAMIENTAS[-1]["cache_control"] = {"type": "ephemeral"}
+
+_cliente = None
+_memoria = {}          # telegram_id -> {"t": timestamp, "mensajes": [...]}
+_cerrojo = threading.Lock()
+
+
+def cliente():
+    global _cliente
+    if _cliente is None:
+        _cliente = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], max_retries=3)
+    return _cliente
+
+
+def olvidar(uid):
+    with _cerrojo:
+        _memoria.pop(uid, None)
+
+
+def _historial(uid):
+    with _cerrojo:
+        m = _memoria.get(uid)
+        if not m or time.time() - m["t"] > MINUTOS_MEMORIA * 60:
+            return []
+        return list(m["mensajes"])
+
+
+def _guardar(uid, pregunta, respuesta):
+    previos = _historial(uid)
+    nuevos = previos + [{"role": "user", "content": pregunta}, {"role": "assistant", "content": respuesta}]
+    with _cerrojo:
+        _memoria[uid] = {"t": time.time(), "mensajes": nuevos[-2 * TURNOS_MEMORIA:]}
+
+
+def _anio(valor):
+    m = re.search(r"(19|20)\d{2}", str(valor or ""))
+    return int(m.group(0)) if m else None
+
+
+def buscar(con, consulta, cliente_=None, idioma=None, anio_desde=None, anio_hasta=None, limite=8):
+    limite = max(1, min(int(limite or 8), 15))
+    filas = db.buscar(con, consulta, 60 if (cliente_ or idioma or anio_desde or anio_hasta) else limite)
+    salida = []
+    for f in filas:
+        if cliente_ and db.sin_tildes(cliente_).lower() not in db.sin_tildes(f["cliente"] or "").lower():
+            continue
+        if idioma and db.sin_tildes(idioma).lower()[:4] not in db.sin_tildes(f["idiomas"] or "").lower():
+            continue
+        a = _anio(f["anio"])
+        if (anio_desde and (a is None or a < anio_desde)) or (anio_hasta and (a is None or a > anio_hasta)):
+            continue
+        salida.append(f)
+        if len(salida) >= limite:
+            break
+    return salida
+
+
+def _ficha_breve(con, f):
+    archivos = db.archivos_de(con, f["grupo"])
+    return {
+        "grupo": f["grupo"], "titulo": f["titulo"], "cliente": f["cliente"], "campana": f["campana"],
+        "anio": f["anio"], "idiomas": f["idiomas"], "vehiculos": f["vehiculos"], "formato": f["formato"],
+        "tematicas": f["tematicas"], "publico": f["publico"], "resumen": f["resumen"],
+        "archivos": [a["nombre"] for a in archivos][:4],
+    }
+
+
+def responder(con, uid, pregunta):
+    """Devuelve (mensaje, [fichas elegidas]) o lanza excepción si la API falla."""
+    mensajes = _historial(uid) + [{"role": "user", "content": pregunta}]
+    vistos = {}
+    for vuelta in range(MAX_VUELTAS + 1):
+        r = cliente().messages.create(
+            model=MODELO, max_tokens=1200,
+            system=[{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
+            tools=HERRAMIENTAS,
+            tool_choice={"type": "auto"},   # "auto": algunos modelos no aceptan forzar la herramienta
+            messages=mensajes,
+        )
+        usos = [b for b in r.content if b.type == "tool_use"]
+        final = next((b for b in usos if b.name == "mostrar_dossieres"), None)
+        if final:
+            ids = [g for g in final.input.get("dossieres", []) if g in vistos][:5]
+            texto = (final.input.get("mensaje") or "").strip()
+            _guardar(uid, pregunta, texto + ("\n[Dossieres mostrados: " + "; ".join(
+                f"{vistos[g]['titulo']} ({g})" for g in ids) + "]" if ids else ""))
+            return texto, [vistos[g] for g in ids]
+        if not usos:   # respondió con texto sin herramienta
+            texto = "".join(getattr(b, "text", "") for b in r.content).strip()
+            _guardar(uid, pregunta, texto)
+            return texto, []
+        if vuelta == MAX_VUELTAS:   # ya ha buscado bastante: cerramos con lo visto
+            break
+        mensajes.append({"role": "assistant", "content": r.content})
+        resultados = []
+        for b in usos:
+            if b.name == "buscar_dossieres":
+                a = b.input
+                filas = buscar(con, a.get("consulta", ""), a.get("cliente"), a.get("idioma"),
+                               a.get("anio_desde"), a.get("anio_hasta"), a.get("limite"))
+                fichas = [_ficha_breve(con, f) for f in filas]
+                for f in fichas:
+                    vistos[f["grupo"]] = f
+                contenido = json.dumps(fichas, ensure_ascii=False) if fichas else "Sin resultados."
+            else:
+                contenido = "Herramienta desconocida."
+            resultados.append({"type": "tool_result", "tool_use_id": b.id, "content": contenido})
+        if vuelta == MAX_VUELTAS - 1:
+            resultados.append({"type": "text", "text": "Ya no puedes buscar más: responde con mostrar_dossieres."})
+        mensajes.append({"role": "user", "content": resultados})
+    cercanos = list(vistos.values())[:3]
+    texto = ("No he dado con algo claro. Esto es lo más cercano que he visto:" if cercanos
+             else "No he encontrado dossieres con eso. Prueba con el cliente, el tema o el tipo de acción.")
+    _guardar(uid, pregunta, texto)
+    return texto, cercanos

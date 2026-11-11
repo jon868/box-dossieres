@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -22,6 +23,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import asistente  # noqa: E402
 import box  # noqa: E402
 import db  # noqa: E402
 
@@ -33,6 +35,8 @@ HORAS_SALUDO = int(os.getenv("HORAS_SALUDO", "6"))
 RESULTADOS = int(os.getenv("RESULTADOS", "5"))
 AUTO_INDEXAR = os.getenv("AUTO_INDEXAR", "false").lower() == "true"
 INDEXAR_HORA = int(os.getenv("INDEXAR_HORA", "3"))
+USAR_CLAUDE = os.getenv("USAR_CLAUDE", "true").lower() == "true"   # false: solo búsqueda por palabras
+HILOS = int(os.getenv("HILOS_BOT", "4"))
 
 
 # ---------------------------------------------------------------- Telegram
@@ -125,19 +129,32 @@ def cmd_admin(con, chat, u, texto):
     return False
 
 
+def lista_con_botones(inicio, mensaje, fichas):
+    lineas, botones = [inicio + e(mensaje)], []
+    for i, f in enumerate(fichas, 1):
+        datos = " · ".join(x for x in (f["cliente"], f["anio"], f["idiomas"]) if x)
+        lineas.append(f"\n<b>{i}. {e(f['titulo'])}</b>\n<i>{e(datos)}</i>")
+        botones.append([{"text": f"📥 {i}. {f['titulo'][:40]}", "callback_data": f"d:{f['grupo']}"}])
+    return "\n".join(lineas)[:4000], botones
+
+
 def responder_busqueda(con, chat, u, de, texto):
     inicio = saludo(con, u, de)
-    resultados = db.buscar(con, texto, RESULTADOS)
     registrar(con, u["telegram_id"], "buscar", texto[:300])
+    tg("sendChatAction", chat_id=chat, action="typing")
+    if USAR_CLAUDE:
+        try:
+            mensaje, fichas = asistente.responder(con, u["telegram_id"], texto)
+            return enviar(chat, *lista_con_botones(inicio, mensaje, fichas))
+        except Exception as ex:  # noqa: BLE001  si Claude falla, búsqueda directa
+            print(f"Asistente no disponible ({ex}); búsqueda directa.", flush=True)
+    resultados = db.buscar(con, texto, RESULTADOS)
     if not resultados:
         return enviar(chat, inicio + "No he encontrado dossieres con eso. Prueba con otras palabras "
                                      "(cliente, tema, vehículo o tipo de acción).")
-    lineas, botones = [inicio + f"He encontrado {len(resultados)} dossier{'es' if len(resultados) > 1 else ''}:"], []
-    for i, f in enumerate(resultados, 1):
-        datos = " · ".join(x for x in (f["cliente"], f["anio"], f["vehiculos"], f["idiomas"]) if x)
-        lineas.append(f"\n<b>{i}. {e(f['titulo'])}</b>\n<i>{e(datos)}</i>\n{e(f['resumen'])}")
-        botones.append([{"text": f"📥 {i}. {f['titulo'][:40]}", "callback_data": f"d:{f['grupo']}"}])
-    return enviar(chat, "\n".join(lineas)[:4000], botones)
+    texto_r, botones = lista_con_botones(inicio, f"He encontrado {len(resultados)} dossier"
+                                                 f"{'es' if len(resultados) > 1 else ''}:", resultados)
+    return enviar(chat, texto_r, botones)
 
 
 def responder_descarga(con, consulta, u):
@@ -191,11 +208,17 @@ def atender(con, upd):
     if texto.startswith("/") and u["admin"] and cmd_admin(con, chat, u, texto):
         return None
     if texto.split("@")[0].lower() in ("/start", "/ayuda", "/help"):
+        asistente.olvidar(de["id"])
         con.execute("UPDATE usuarios SET ultimo_saludo = NULL WHERE telegram_id = ?", (de["id"],))
         u = usuario(con, de["id"])
         return enviar(chat, saludo(con, u, de) + "Soy el buscador de dossieres de alegria-activity. Dime qué "
                                                  "buscas (cliente, tema, vehículo, tipo de acción) y te enseño los "
-                                                 "dossieres y te los envío.\nEjemplo: <i>bibliobús en inglés</i>")
+                                                 "dossieres y te los envío. Puedes preguntarme como a un compañero.\nEjemplos: "
+                                                 "<i>bibliobús en inglés</i> · <i>algo de salud para colegios en "
+                                                 "Airstream</i>\nCon /nuevo empiezo una búsqueda desde cero.")
+    if texto.split("@")[0].lower() == "/nuevo":
+        asistente.olvidar(de["id"])
+        return enviar(chat, "Hecho, empezamos de cero. ¿Qué dossier buscas?")
     if texto.startswith("/"):
         return enviar(chat, "No conozco ese comando. Escríbeme directamente lo que buscas.")
     return responder_busqueda(con, chat, u, de, texto)
@@ -221,10 +244,12 @@ def main():
         sys.exit("Define ADMIN_IDS con tu ID de Telegram.")
     con = db.conectar()
     asegurar_admins(con)
-    tg("setMyCommands", commands=[{"command": "start", "description": "Qué puedo hacer"}])
+    tg("setMyCommands", commands=[{"command": "start", "description": "Qué puedo hacer"},
+                                  {"command": "nuevo", "description": "Empezar una búsqueda desde cero"}])
     if AUTO_INDEXAR:
         threading.Thread(target=indexado_nocturno, daemon=True).start()
     print("Bot de dossieres en marcha.", flush=True)
+    hilos = ThreadPoolExecutor(HILOS)
     offset = None
     while True:
         try:
@@ -236,10 +261,18 @@ def main():
             continue
         for upd in updates:
             offset = upd["update_id"] + 1
-            try:
-                atender(con, upd)
-            except Exception as ex:  # noqa: BLE001
-                print(f"Error atendiendo {upd.get('update_id')}: {ex}", flush=True)
+            hilos.submit(atender_seguro, upd)
+
+
+def atender_seguro(upd):
+    """Cada mensaje en su hilo y con su conexión: una respuesta lenta de Claude no bloquea a los demás."""
+    con = db.conectar()
+    try:
+        atender(con, upd)
+    except Exception as ex:  # noqa: BLE001
+        print(f"Error atendiendo {upd.get('update_id')}: {ex}", flush=True)
+    finally:
+        con.close()
 
 
 if __name__ == "__main__":

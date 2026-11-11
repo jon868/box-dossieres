@@ -14,7 +14,10 @@ Solo responde en chats privados a quien esté en la lista de permitidos, y salud
    saca su texto, junta versiones e idiomas del mismo dossier (`_baja`, `_PRINT`, `_ENG`, `V2`…) y crea con
    Haiku (Batch API) una ficha por dossier: cliente, campaña, vehículos, formato, temáticas, público y resumen.
    Todo queda en `datos/dossieres.db` (SQLite), con un buscador de texto completo.
-2. `bot.py` atiende Telegram: busca en ese índice, enseña los dossieres con un botón **📥** y envía el archivo.
+2. `bot.py` atiende Telegram. Con `asistente.py`, Claude interpreta la pregunta ("algo de salud para colegios
+   en Airstream"), busca en el índice las veces que haga falta y propone los dossieres que encajan, explicando
+   por qué, con un botón **📥** para descargarlos. Recuerda la conversación una hora ("¿y en inglés?",
+   "el segundo"); `/nuevo` empieza de cero. Si la API de Claude falla, el bot hace una búsqueda directa.
    Si pesa más de 50 MB (límite de Telegram para bots) manda un enlace de descarga de Box que caduca en minutos.
 
 ## 1. Antes de empezar
@@ -69,7 +72,8 @@ Los administradores son los IDs de `ADMIN_IDS`. Cada búsqueda y descarga queda 
 | `db.py` | Esquema SQLite, buscador FTS5 y consultas comunes |
 | `indexar.py` | Indexador por pasos (listar, excel, textos, agrupar, enviar, recoger…) |
 | `bot.py` | Bot de Telegram: permisos, saludo, búsqueda, descarga e indexado nocturno |
+| `asistente.py` | Claude en el bot: system prompt, herramientas de búsqueda y memoria de la conversación |
 
-## Pendiente (siguiente fase)
-- Que Claude interprete la pregunta y ordene los resultados ("algo parecido a lo de Iberdrola pero para colegios").
-- Filtros por año, idioma o vehículo desde el propio chat.
+## Ajustar el comportamiento del asistente
+El system prompt está en `asistente.py` (constante `SYSTEM`); las herramientas que puede usar, justo debajo.
+Cada pregunta cuesta muy poco con Haiku (el gasto real se ve en la Console); se puede cambiar de modelo con `BOT_MODELO`.
