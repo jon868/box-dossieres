@@ -62,6 +62,7 @@ Si se corta, relánzalo: reanuda (no repite textos ni fichas ya hechas).
 - `/permitir 123456789 Juncal` · da acceso; el bot la saludará como "Juncal".
 - `/quitar 123456789` · quita el acceso.
 - `/usuarios` · lista quién tiene acceso.
+- `/informe [días]` · uso y calidad de las respuestas.
 
 Los administradores son los IDs de `ADMIN_IDS`. Cada búsqueda y descarga queda en la tabla `registro`.
 
@@ -73,6 +74,23 @@ Los administradores son los IDs de `ADMIN_IDS`. Cada búsqueda y descarga queda 
 | `indexar.py` | Indexador por pasos (listar, excel, textos, agrupar, enviar, recoger…) |
 | `bot.py` | Bot de Telegram: permisos, saludo, búsqueda, descarga e indexado nocturno |
 | `asistente.py` | Claude en el bot: system prompt, herramientas de búsqueda y memoria de la conversación |
+| `uso.py` | Registro de uso, señales implícitas e informes |
+
+## Registro de uso y calidad
+Cada respuesta del bot queda registrada con su contexto (pregunta, búsquedas que hizo Claude, dossieres
+mostrados, versión del prompt, tokens y tiempo) y se le suman **señales implícitas**, sin preguntar nada:
+- **descarga** de un dossier de esa respuesta (y en qué posición estaba) → buena señal;
+- **repregunta** a los pocos minutos sin haber descargado → probable fallo (no cuenta si el bot había preguntado);
+- **/nuevo** poco después de una respuesta sin descarga → probable fallo.
+
+Para verlo:
+- En Telegram (administradores): `/informe` o `/informe 30` (días).
+- En la consola: `python uso.py informe --dias 30` y `python uso.py casos --dias 30` (detalle de las respuestas
+  con señales de fallo: qué buscó Claude, qué encontró y qué respondió; es lo que sirve para afinar el prompt).
+
+La versión del prompt se calcula sola a partir de `SYSTEM_BASE` y las herramientas, así que al cambiarlo se puede
+comparar antes y después. El registro se borra pasados `REGISTRO_DIAS` (365 por defecto). Al dar acceso, el bot
+avisa de que las búsquedas se guardan.
 
 ## Ajustar el comportamiento del asistente
 El system prompt está en `asistente.py` (constante `SYSTEM`); las herramientas que puede usar, justo debajo.

@@ -5,6 +5,7 @@ y ayuda a la persona a dar con el dossier que necesita.
 Claude solo ve las fichas que devuelve el buscador: no puede recomendar dossieres que no existan.
 Termina siempre con la herramienta mostrar_dossieres (mensaje + dossieres con botón de descarga).
 """
+import hashlib
 import json
 import os
 import re
@@ -180,10 +181,26 @@ def _ficha_breve(con, f):
     }
 
 
+def version_prompt():
+    """Huella del prompt y las herramientas: cambia sola cuando se edita SYSTEM_BASE o HERRAMIENTAS."""
+    base = SYSTEM_BASE + json.dumps(HERRAMIENTAS, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha1(base.encode()).hexdigest()[:8]
+
+
 def responder(con, uid, pregunta):
-    """Devuelve (mensaje, [fichas elegidas]) o lanza excepción si la API falla."""
-    mensajes = _historial(uid) + [{"role": "user", "content": pregunta}]
+    """Devuelve (mensaje, [fichas elegidas], traza) o lanza excepción si la API falla.
+    La traza (búsquedas, tokens, vueltas, desenlace) se guarda en el registro de uso."""
+    historial = _historial(uid)
+    mensajes = historial + [{"role": "user", "content": pregunta}]
     vistos = {}
+    traza = {"via": "claude", "modelo": MODELO, "version_prompt": version_prompt(),
+             "turnos_previos": len(historial) // 2, "busquedas": [], "vueltas": 0,
+             "uso": {"entrada": 0, "salida": 0, "cache": 0}}
+
+    def cerrar(texto, fichas, desenlace):
+        traza["desenlace"] = desenlace
+        return texto, fichas, traza
+
     for vuelta in range(MAX_VUELTAS + 1):
         r = cliente().messages.create(
             model=MODELO, max_tokens=1200,
@@ -192,6 +209,11 @@ def responder(con, uid, pregunta):
             tool_choice={"type": "auto"},   # "auto": algunos modelos no aceptan forzar la herramienta
             messages=mensajes,
         )
+        traza["vueltas"] = vuelta + 1
+        u = r.usage
+        traza["uso"]["entrada"] += (u.input_tokens or 0) + (getattr(u, "cache_creation_input_tokens", 0) or 0)
+        traza["uso"]["cache"] += getattr(u, "cache_read_input_tokens", 0) or 0
+        traza["uso"]["salida"] += u.output_tokens or 0
         usos = [b for b in r.content if b.type == "tool_use"]
         final = next((b for b in usos if b.name == "mostrar_dossieres"), None)
         if final:
@@ -199,11 +221,13 @@ def responder(con, uid, pregunta):
             texto = (final.input.get("mensaje") or "").strip()
             _guardar(uid, pregunta, texto + ("\n[Dossieres mostrados: " + "; ".join(
                 f"{vistos[g]['titulo']} ({g})" for g in ids) + "]" if ids else ""))
-            return texto, [vistos[g] for g in ids]
+            desenlace = ("recomendacion" if ids else
+                         "pregunta" if texto.rstrip().endswith("?") else "sin_resultados")
+            return cerrar(texto, [vistos[g] for g in ids], desenlace)
         if not usos:   # respondió con texto sin herramienta
             texto = "".join(getattr(b, "text", "") for b in r.content).strip()
             _guardar(uid, pregunta, texto)
-            return texto, []
+            return cerrar(texto, [], "texto")
         if vuelta == MAX_VUELTAS:   # ya ha buscado bastante: cerramos con lo visto
             break
         mensajes.append({"role": "assistant", "content": r.content})
@@ -214,6 +238,8 @@ def responder(con, uid, pregunta):
                 filas = buscar(con, a.get("consulta", ""), a.get("cliente"), a.get("idioma"),
                                a.get("anio_desde"), a.get("anio_hasta"), a.get("limite"), a.get("orden"))
                 fichas = [_ficha_breve(con, f) for f in filas]
+                traza["busquedas"].append({"parametros": a, "n": len(fichas),
+                                           "grupos": [f["grupo"] for f in fichas]})
                 for f in fichas:
                     vistos[f["grupo"]] = f
                 contenido = json.dumps(fichas, ensure_ascii=False) if fichas else "Sin resultados."
@@ -227,4 +253,4 @@ def responder(con, uid, pregunta):
     texto = ("No he dado con algo claro. Esto es lo más cercano que he visto:" if cercanos
              else "No he encontrado dossieres con eso. Prueba con el cliente, el tema o el tipo de acción.")
     _guardar(uid, pregunta, texto)
-    return texto, cercanos
+    return cerrar(texto, cercanos, "cercanos" if cercanos else "sin_resultados")

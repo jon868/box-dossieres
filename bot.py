@@ -7,7 +7,7 @@ Bot de Telegram para consultar y descargar dossieres de alegria-activity.
 - Busca en el índice que genera indexar.py y envía el PDF; si pesa más de 50 MB, un enlace temporal de Box.
 - Opcional: relanza el indexador cada noche (AUTO_INDEXAR=true, INDEXAR_HORA=3).
 
-Comandos de administración: /permitir <id> <nombre>, /quitar <id>, /usuarios
+Comandos de administración: /permitir <id> <nombre>, /quitar <id>, /usuarios, /informe [días]
 """
 import html
 import os
@@ -26,6 +26,7 @@ load_dotenv()
 import asistente  # noqa: E402
 import box  # noqa: E402
 import db  # noqa: E402
+import uso  # noqa: E402
 
 TOKEN = box.entorno("TELEGRAM_TOKEN")
 TG = f"https://api.telegram.org/bot{TOKEN}"
@@ -109,7 +110,8 @@ def cmd_admin(con, chat, u, texto):
         registrar(con, u["telegram_id"], "permitir", f"{nuevo} {nombre}")
         enviar(chat, f"✅ {e(nombre)} ({nuevo}) ya puede usar el bot.")
         enviar(nuevo, f"Hola {e(nombre)} 👋 Ya tienes acceso al buscador de dossieres. "
-                      "Escríbeme qué buscas, por ejemplo: <i>salud mental en Airstream</i>.")
+                      "Escríbeme qué buscas, por ejemplo: <i>salud mental en Airstream</i>.\n"
+                      "Tus búsquedas se guardan para ir mejorando el buscador.")
         return True
     if orden == "/quitar":
         if len(partes) < 2 or not partes[1].lstrip("-").isdigit():
@@ -121,6 +123,9 @@ def cmd_admin(con, chat, u, texto):
         con.commit()
         registrar(con, u["telegram_id"], "quitar", str(quitado))
         return enviar(chat, f"Hecho: {quitado} ya no tiene acceso.") or True
+    if orden == "/informe":
+        dias = int(partes[1]) if len(partes) > 1 and partes[1].isdigit() else 7
+        return enviar(chat, "<pre>" + e(uso.resumen(con, dias)) + "</pre>") or True
     if orden == "/usuarios":
         filas = con.execute("SELECT * FROM usuarios ORDER BY admin DESC, nombre").fetchall()
         lineas = [f"{'⭐ ' if f['admin'] else '• '}{e(f['nombre'] or '(sin nombre)')} · <code>{f['telegram_id']}</code>"
@@ -129,39 +134,58 @@ def cmd_admin(con, chat, u, texto):
     return False
 
 
-def lista_con_botones(inicio, mensaje, fichas):
+def lista_con_botones(inicio, mensaje, fichas, iid=None):
     lineas, botones = [inicio + e(mensaje)], []
     for i, f in enumerate(fichas, 1):
         fecha = f.get("anio") or (f.get("fecha") or "")[:7]
         datos = " · ".join(x for x in (f["cliente"], fecha, f["idiomas"]) if x)
         lineas.append(f"\n<b>{i}. {e(f['titulo'])}</b>\n<i>{e(datos)}</i>")
-        botones.append([{"text": f"📥 {i}. {f['titulo'][:40]}", "callback_data": f"d:{f['grupo']}"}])
+        # el id de la respuesta va en el botón para saber qué descarga viene de qué respuesta
+        datos_boton = f"d:{f['grupo']}:{iid}" if iid else f"d:{f['grupo']}"
+        botones.append([{"text": f"📥 {i}. {f['titulo'][:40]}", "callback_data": datos_boton}])
     return "\n".join(lineas)[:4000], botones
 
 
 def responder_busqueda(con, chat, u, de, texto):
+    uid = u["telegram_id"]
     inicio = saludo(con, u, de)
-    registrar(con, u["telegram_id"], "buscar", texto[:300])
+    registrar(con, uid, "buscar", texto[:300])
+    uso.nueva_pregunta(con, uid)
     tg("sendChatAction", chat_id=chat, action="typing")
+    t0 = time.time()
+    traza = {"via": "directa"}
     if USAR_CLAUDE:
         try:
-            mensaje, fichas = asistente.responder(con, u["telegram_id"], texto)
-            return enviar(chat, *lista_con_botones(inicio, mensaje, fichas))
+            respuesta = asistente.responder(con, uid, texto)
         except Exception as ex:  # noqa: BLE001  si Claude falla, búsqueda directa
             print(f"Asistente no disponible ({ex}); búsqueda directa.", flush=True)
+            respuesta, traza = None, {"via": "directa", "error": str(ex)[:500]}
+        if respuesta:
+            mensaje, fichas, traza = respuesta
+            traza["ms"] = round((time.time() - t0) * 1000)
+            iid = uso.guardar(con, uid, texto, traza, mensaje, fichas)
+            return enviar(chat, *lista_con_botones(inicio, mensaje, fichas, iid))
     resultados = db.buscar(con, texto, RESULTADOS)
+    traza.update(ms=round((time.time() - t0) * 1000),
+                 desenlace="recomendacion" if resultados else "sin_resultados",
+                 busquedas=[{"parametros": {"consulta": texto}, "n": len(resultados)}])
     if not resultados:
-        return enviar(chat, inicio + "No he encontrado dossieres con eso. Prueba con otras palabras "
-                                     "(cliente, tema, vehículo o tipo de acción).")
-    texto_r, botones = lista_con_botones(inicio, f"He encontrado {len(resultados)} dossier"
-                                                 f"{'es' if len(resultados) > 1 else ''}:", resultados)
-    return enviar(chat, texto_r, botones)
+        mensaje = ("No he encontrado dossieres con eso. Prueba con otras palabras "
+                   "(cliente, tema, vehículo o tipo de acción).")
+        uso.guardar(con, uid, texto, traza, mensaje, [])
+        return enviar(chat, inicio + mensaje)
+    mensaje = f"He encontrado {len(resultados)} dossier{'es' if len(resultados) > 1 else ''}:"
+    iid = uso.guardar(con, uid, texto, traza, mensaje, resultados)
+    return enviar(chat, *lista_con_botones(inicio, mensaje, resultados, iid))
 
 
 def responder_descarga(con, consulta, u):
     chat = consulta["message"]["chat"]["id"]
     tg("answerCallbackQuery", callback_query_id=consulta["id"], text="Preparando el dossier...")
-    grupo = consulta["data"].split(":", 1)[1]
+    partes = consulta["data"].split(":")
+    grupo = partes[1]
+    if len(partes) > 2 and partes[2].isdigit():
+        uso.descarga(con, u["telegram_id"], int(partes[2]), grupo)
     archivos = db.archivos_de(con, grupo)
     if not archivos:
         return enviar(chat, "Ese dossier ya no está en Box.")
@@ -218,6 +242,7 @@ def atender(con, upd):
                                                  "<i>bibliobús en inglés</i> · <i>algo de salud para colegios en "
                                                  "Airstream</i>\nCon /nuevo empiezo una búsqueda desde cero.")
     if texto.split("@")[0].lower() == "/nuevo":
+        uso.reinicio(con, de["id"])
         asistente.olvidar(de["id"])
         return enviar(chat, "Hecho, empezamos de cero. ¿Qué dossier buscas?")
     if texto.startswith("/"):
@@ -240,6 +265,19 @@ def indexado_nocturno():
         time.sleep(300)
 
 
+def purga_diaria():
+    while True:
+        try:
+            con = db.conectar()
+            n = uso.purgar(con)
+            con.close()
+            if n:
+                print(f"Registro: {n} respuestas antiguas borradas.", flush=True)
+        except Exception as ex:  # noqa: BLE001
+            print(f"Error purgando el registro: {ex}", flush=True)
+        time.sleep(24 * 3600)
+
+
 def main():
     if not ADMINS:
         sys.exit("Define ADMIN_IDS con tu ID de Telegram.")
@@ -249,6 +287,7 @@ def main():
                                   {"command": "nuevo", "description": "Empezar una búsqueda desde cero"}])
     if AUTO_INDEXAR:
         threading.Thread(target=indexado_nocturno, daemon=True).start()
+    threading.Thread(target=purga_diaria, daemon=True).start()
     print("Bot de dossieres en marcha.", flush=True)
     hilos = ThreadPoolExecutor(HILOS)
     offset = None

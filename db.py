@@ -48,6 +48,24 @@ CREATE TABLE IF NOT EXISTS registro (
     ts TEXT DEFAULT (datetime('now')), telegram_id INTEGER, accion TEXT, detalle TEXT
 );
 
+-- Una fila por respuesta del bot, con todo su contexto (ver uso.py)
+CREATE TABLE IF NOT EXISTS interacciones (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT DEFAULT (datetime('now')), telegram_id INTEGER,
+    pregunta TEXT, turnos_previos INTEGER, via TEXT, desenlace TEXT, mensaje TEXT,
+    busquedas TEXT, mostrados TEXT, version_prompt TEXT, modelo TEXT, vueltas INTEGER,
+    tokens_entrada INTEGER, tokens_salida INTEGER, tokens_cache INTEGER, ms INTEGER, error TEXT,
+    descargas INTEGER DEFAULT 0, pos_primera_descarga INTEGER, seg_hasta_descarga INTEGER,
+    repregunta INTEGER DEFAULT 0, reinicio INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS interacciones_usuario ON interacciones(telegram_id, id);
+
+-- Señales implícitas de uso ligadas a una respuesta: descarga, repregunta, reinicio
+CREATE TABLE IF NOT EXISTS senales (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT DEFAULT (datetime('now')), interaccion_id INTEGER,
+    telegram_id INTEGER, tipo TEXT, valor INTEGER, detalle TEXT
+);
+CREATE INDEX IF NOT EXISTS senales_interaccion ON senales(interaccion_id);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS buscador USING fts5(
     grupo UNINDEXED, titulo, cliente, campana, tematicas, vehiculos, formato,
     resumen, palabras_clave, nombres, texto,
