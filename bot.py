@@ -132,6 +132,10 @@ def cmd_admin(con, chat, u, texto):
         dias = int(partes[1]) if len(partes) > 1 and partes[1].isdigit() else 7
         return enviar(chat, "<pre>" + e(uso.resumen(con, dias)) + "</pre>") or True
     if orden == "/catalogos":
+        if len(partes) > 1 and partes[1].lower() == "exportar":
+            tg("sendDocument", chat_id=chat, caption="Catálogo actual. Para cambiarlo, edítalo y mándamelo.",
+               files={"document": ("catalogos.json", catalogos.RUTA.read_bytes())})
+            return True
         if len(partes) > 1 and partes[1].lower() == "lista":
             return enviar(chat, "<pre>" + e(catalogos.resumen_para_prompt())[:3900] + "</pre>") or True
         enviar(chat, "Busco catálogos nuevos en Material Comercial; te aviso al terminar.")
@@ -247,6 +251,10 @@ def atender(con, upd):
             print(f"Error en descarga: {ex}", flush=True)
             return enviar(q["message"]["chat"]["id"], "No he podido traer el archivo de Box. Prueba en un rato.")
     msg = upd.get("message")
+    if msg and msg["chat"]["type"] == "private" and msg.get("document", {}).get("file_name") == "catalogos.json":
+        u = usuario(con, msg["from"]["id"])
+        if u and u["admin"]:
+            return importar_catalogos(msg)
     if not msg or msg["chat"]["type"] != "private" or "text" not in msg:
         return None
     de, chat, texto = msg["from"], msg["chat"]["id"], msg["text"].strip()
@@ -299,6 +307,18 @@ def revisar_catalogos(chat=None):
             enviar(d, e(texto), [[{"text": "↩️ Deshacer", "callback_data": f"cx:{fid}"}]])
         if chat or inf["anadidos"] or inf["quitados"] or inf["errores"]:
             enviar(d, e(catalogos.texto_informe(inf)))
+
+
+def importar_catalogos(msg):
+    """Un administrador manda catalogos.json por Telegram: sustituye al del volumen (guarda copia del anterior)."""
+    chat = msg["chat"]["id"]
+    try:
+        info = tg("getFile", file_id=msg["document"]["file_id"])
+        datos = requests.get(f"https://api.telegram.org/file/bot{TOKEN}/{info['file_path']}", timeout=60).content
+        mensaje = catalogos.importar(datos)
+    except Exception as ex:  # noqa: BLE001
+        mensaje = f"⚠️ No lo he podido importar: {ex}"
+    return enviar(chat, e(mensaje))
 
 
 def deshacer_catalogo(q, u):

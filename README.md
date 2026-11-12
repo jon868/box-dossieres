@@ -28,18 +28,19 @@ fichas de vehículos y el portfolio (este último solo si lo piden por su nombre
 - Por defecto da la última edición en el idioma pedido y en `baja` (para correo), y ofrece las anteriores y los
   otros formatos (`pantalla`, `pliegos` para imprenta, `alta`).
 
-**Se mantiene solo.** El catálogo vive en `datos/catalogos.json`. Cada noche (a `INDEXAR_HORA`, con
-`AUTO_CATALOGOS=true`) el bot recorre Material Comercial:
+**Se mantiene solo.** El catálogo vive solo en `datos/catalogos.json` (el volumen), nunca en el repo: es público y no
+debe llevar nombres de archivos ni ids de Box. Cada noche (a `INDEXAR_HORA`, con `AUTO_CATALOGOS=true`) el bot
+recorre Material Comercial:
 1. descarta por regla planos, certificados, PDF de menos de 1 MB y copias exactas de archivos que ya tiene;
 2. a cada PDF nuevo que quede, Claude (Haiku) le lee nombre, ruta y principio del texto y decide si es una edición,
    idioma o formato nuevo de un catálogo, un catálogo nuevo o algo que no es catálogo;
 3. lo añade y avisa a los administradores por Telegram, uno a uno, con un botón **↩️ Deshacer**;
 4. quita lo que se haya borrado de Box.
 
-Comandos: `/catalogos` lanza la revisión en el momento y `/catalogos lista` enseña el resumen. En la consola:
-`python catalogos.py listar | actualizar | comprobar | deshacer <id>`.
-El `catalogos.json` del repo es la semilla: si se edita a mano y se sube su `version`, al arrancar se le suma al
-catálogo vivo lo que traiga de nuevo (sin borrar lo añadido automáticamente).
+Comandos (administradores): `/catalogos` lanza la revisión en el momento, `/catalogos lista` enseña el resumen y
+`/catalogos exportar` manda el `catalogos.json` actual. Para cambiarlo a mano, edítalo y **mándaselo al bot** como
+archivo llamado `catalogos.json`: lo valida, guarda copia del anterior y lo sustituye.
+En la consola: `python catalogos.py listar | actualizar | comprobar | deshacer <id> | importar <ruta>`.
 
 ## 1. Antes de empezar
 - **Bot**: en Telegram, habla con **@BotFather** → `/newbot` → guarda el token.
@@ -96,7 +97,7 @@ Los administradores son los IDs de `ADMIN_IDS`. Cada búsqueda y descarga queda 
 | `bot.py` | Bot de Telegram: permisos, saludo, búsqueda, descarga e indexado nocturno |
 | `asistente.py` | Claude en el bot: system prompt, herramientas de búsqueda y memoria de la conversación |
 | `uso.py` | Registro de uso, señales implícitas e informes |
-| `catalogos.py` + `catalogos.json` | Catálogos, magazine y presentación: lista mantenida a mano y su búsqueda |
+| `catalogos.py` | Catálogos, magazine y presentación: búsqueda, revisión automática e importación (datos en `datos/catalogos.json`) |
 | `servidor.py` | Publica `indice_dossieres.json` (con contraseña) para el conector de Box |
 
 ## Buscar dossieres desde Claude Team (conector Box_alegria)

@@ -4,3 +4,5 @@ datos/
 .git/
 __pycache__/
 *.pyc
+catalogos.json
+catalogos.*.json

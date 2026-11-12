@@ -1,8 +1,10 @@
 """
 Catálogos, magazines y presentaciones de alegria-activity (Box: 00.COMPARTIDO / 1. Material Comercial).
 
-El catálogo vive en datos/catalogos.json (en el volumen, para que sobreviva a los redespliegues). La primera vez
-se copia de catalogos.json del repo, y si el del repo sube de "version" se le suma lo que traiga de nuevo.
+El catálogo vive SOLO en datos/catalogos.json (en el volumen, como el índice de dossieres): el repo es público y
+no debe llevar nombres de archivos ni ids de Box. Para cargarlo o cambiarlo a mano, un administrador manda
+catalogos.json al bot por Telegram (/catalogos exportar devuelve el actual). Si existe un catalogos.json junto al
+código (solo en local, está en .gitignore) se usa como semilla la primera vez.
 
 Cada noche (o con /catalogos desde Telegram) actualizar():
   1. recorre Material Comercial (menos las carpetas que no son material comercial: vídeos, fotos, web...);
@@ -17,6 +19,7 @@ Consola:
   python catalogos.py actualizar      Busca y clasifica PDF nuevos (lo mismo que hace el bot cada noche)
   python catalogos.py comprobar       Mira que todos los archivos siguen en Box
   python catalogos.py deshacer <id>   Saca un archivo del catálogo y lo deja como descartado
+  python catalogos.py importar <ruta> Sustituye el catálogo por ese archivo (guarda copia del anterior)
 """
 import json
 import os
@@ -97,6 +100,28 @@ def datos():
             _fusionar_semilla(_cache["datos"], semilla)
             guardar(_cache["datos"])
         return _cache["datos"]
+
+
+def importar(contenido):
+    """Valida un catalogos.json (bytes) y lo pone en lugar del actual, guardando copia del anterior."""
+    d = json.loads(contenido.decode("utf-8") if isinstance(contenido, bytes) else contenido)
+    if not isinstance(d.get("catalogos"), list):
+        raise ValueError("no tiene la lista 'catalogos'")
+    for c in d["catalogos"]:
+        for k in ("id", "titulo", "ediciones"):
+            if k not in c:
+                raise ValueError(f"a un catálogo le falta '{k}'")
+        for e in c["ediciones"]:
+            for a in e.get("archivos", []):
+                if not str(a.get("id", "")).isdigit() or "nombre" not in a:
+                    raise ValueError(f"archivo sin id o nombre en {c['id']} {e.get('edicion')}")
+    d.setdefault("descartados", [])
+    with _cerrojo:
+        if RUTA.exists():
+            shutil.copy(RUTA, RUTA.with_name(f"catalogos.{time.strftime('%Y%m%d-%H%M%S')}.json"))
+        guardar(d)
+    n = len(_ids(d))
+    return f"✅ Catálogo importado: {len(d['catalogos'])} catálogos y {n} archivos (copia del anterior en datos/)."
 
 
 def guardar(d):
@@ -439,6 +464,8 @@ if __name__ == "__main__":
         for _, t in inf["anadidos"]:
             print(t, "\n")
         print(texto_informe(inf))
+    elif orden == "importar" and len(sys.argv) > 2:
+        print(importar(Path(sys.argv[2]).read_bytes()))
     elif orden == "deshacer" and len(sys.argv) > 2:
         print(deshacer(sys.argv[2]) or "Ese archivo no está en el catálogo.")
     else:

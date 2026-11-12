@@ -3,3 +3,5 @@ datos/
 .venv/
 __pycache__/
 *.pyc
+catalogos.json
+catalogos.*.json
