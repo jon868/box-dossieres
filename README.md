@@ -98,7 +98,7 @@ Los administradores son los IDs de `ADMIN_IDS`. Cada búsqueda y descarga queda 
 | `asistente.py` | Claude en el bot: system prompt, herramientas de búsqueda y memoria de la conversación |
 | `uso.py` | Registro de uso, señales implícitas e informes |
 | `catalogos.py` | Catálogos, magazine y presentación: búsqueda, revisión automática e importación (datos en `datos/catalogos.json`) |
-| `servidor.py` | Publica `indice_dossieres.json` (con contraseña) para el conector de Box |
+| `servidor.py` | Publica `indice_dossieres.json` e `indice_catalogos.json` (con contraseña) para el conector de Box |
 
 ## Buscar dossieres desde Claude Team (conector Box_alegria)
 Además del bot, el índice se puede usar desde Claude con la herramienta `buscar_dossieres` del conector de Box
@@ -116,6 +116,10 @@ y la skill `buscar-dossieres`.
    ```
    El conector lo recarga cada `INDICE_REFRESCO_MIN` minutos (60 por defecto), como el índice de fotos.
    Comprobación: `/health/box` del conector muestra `indice_dossieres` con el número de dossieres.
+4. **Catálogos**: el mismo servicio publica `https://<dominio>/indice_catalogos.json` (mismo usuario y contraseña),
+   sacado en el momento de `datos/catalogos.json`, así que lo que el bot añade cada noche llega solo al conector.
+   El conector lo busca con `buscar_catalogos`. No hace falta configurar nada más: si no se define
+   `INDICE_CATALOGOS_URL`, el conector usa la misma URL de dossieres cambiando el nombre del archivo.
 
 ## Registro de uso y calidad
 Cada respuesta del bot queda registrada con su contexto (pregunta, búsquedas que hizo Claude, dossieres

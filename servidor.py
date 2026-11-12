@@ -1,5 +1,6 @@
 """
-Mini servidor HTTP que publica indice_dossieres.json para el conector de Box (herramienta buscar_dossieres).
+Mini servidor HTTP que publica para el conector de Box indice_dossieres.json (herramienta buscar_dossieres) e
+indice_catalogos.json (herramienta buscar_catalogos: el mismo catálogo que usa el bot, que se mantiene solo).
 Protegido con usuario y contraseña (INDICE_USUARIO / INDICE_PASSWORD). No sirve nada más: ni la base de
 datos, ni el registro de uso, ni los PDF.
 
@@ -8,14 +9,27 @@ Lo arranca bot.py en un hilo si INDICE_PASSWORD está definida.
 import base64
 import hmac
 import os
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import json
+
+import catalogos
 import db
 
 USUARIO = os.getenv("INDICE_USUARIO", "alegria")
 PASSWORD = os.getenv("INDICE_PASSWORD", "")
 PUERTO = int(os.getenv("PORT", "8080"))
 RUTA = "/indice_dossieres.json"
+RUTA_CATALOGOS = "/indice_catalogos.json"
+
+
+def indice_catalogos():
+    """El catálogo del bot sin lo interno (descartados): catálogos, ediciones, archivos y formatos."""
+    d = catalogos.datos()
+    return json.dumps({"version": d.get("version"), "generado": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                       "formatos": d.get("formatos", {}), "catalogos": d.get("catalogos", [])},
+                      ensure_ascii=False).encode("utf-8")
 
 
 class Manejador(BaseHTTPRequestHandler):
@@ -44,7 +58,10 @@ class Manejador(BaseHTTPRequestHandler):
         if not self._autorizado():
             return self._responder(401, b"Necesita usuario y contrasena",
                                    extra={"WWW-Authenticate": 'Basic realm="box-dossieres"'})
-        if self.path.split("?")[0] != RUTA:
+        ruta = self.path.split("?")[0]
+        if ruta == RUTA_CATALOGOS:
+            return self._responder(200, indice_catalogos(), "application/json; charset=utf-8")
+        if ruta != RUTA:
             return self._responder(404, b"No encontrado")
         archivo = db.DATA / "indice_dossieres.json"
         if not archivo.exists():
@@ -55,5 +72,5 @@ class Manejador(BaseHTTPRequestHandler):
 
 
 def arrancar():
-    print(f"Índice para el conector en el puerto {PUERTO}{RUTA}", flush=True)
+    print(f"Índices para el conector en el puerto {PUERTO}: {RUTA} y {RUTA_CATALOGOS}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PUERTO), Manejador).serve_forever()
