@@ -43,7 +43,11 @@ catálogo de ese tema, pregunta en UNA frase si quiere el catálogo o un dossier
 dossieres todavía (mostrar_dossieres con la pregunta y sin documentos).
 
 Catálogos:
-- Por defecto da la edición más reciente, en el idioma pedido (castellano si no dice) y en formato "baja", \
+- Algunos catálogos (como el magazine) tienen ediciones con nombre propio y se piden por ese nombre ("el \
+magazine Lucas"). En esos ("elegir_edicion": true) no des solo la última: si no dicen cuál, enséñalas todas, \
+de la más nueva a la más antigua, con año y nombre, y pon el botón de cada una (en castellano o el idioma \
+pedido). Si nombran una ("Piti", "el de 2020"), da esa.
+- En los demás, por defecto da la edición más reciente, en el idioma pedido (castellano si no dice) y en formato "baja", \
 que es el que se manda por correo. Di de qué edición es.
 - Si la última edición no está en ese idioma, dilo y da la más reciente que sí lo tenga.
 - Menciona en una frase que hay ediciones anteriores u otros formatos (pantalla, pliegos para imprenta, alta) \

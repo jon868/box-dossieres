@@ -164,7 +164,8 @@ def ficha(file_id):
     if not r:
         return None
     c, e, a = r
-    return {"grupo": PREFIJO + a["id"], "titulo": f"{c['titulo']} {e['edicion']}", "cliente": c["tipo"],
+    apodo = f" · {e['nombre']}" if e.get("nombre") else ""
+    return {"grupo": PREFIJO + a["id"], "titulo": f"{c['titulo']} {e['edicion']}{apodo}", "cliente": c["tipo"],
             "anio": str(e["edicion"]), "idiomas": a.get("idioma") or "", "formato_archivo": a["formato"],
             "nombre": a["nombre"], "mb": a["mb"]}
 
@@ -176,7 +177,9 @@ def buscar(consulta="", idioma=None):
          and p not in ("catalogo", "catalogos", "ultimo", "ultima", "version", "pasame", "manda")]
     salida = []
     for c in datos()["catalogos"]:
-        texto = _norm(" ".join([c["id"], c["titulo"], c["tipo"], c.get("describe", "")] + c.get("palabras", [])))
+        apodos = [e.get("nombre", "") for e in c["ediciones"]]
+        texto = _norm(" ".join([c["id"], c["titulo"], c["tipo"], c.get("describe", "")] + c.get("palabras", [])
+                               + apodos))
         if q and not any(p in texto for p in q):
             continue
         if c.get("solo_si_lo_piden") and not any(p in _norm(" ".join(c.get("palabras", []))) for p in q):
@@ -186,12 +189,13 @@ def buscar(consulta="", idioma=None):
             archivos = [a for a in e["archivos"]
                         if not idioma or _norm(idioma)[:4] in _norm(a.get("idioma") or "")]
             if archivos:
-                eds.append({"edicion": e["edicion"], "nota": e.get("nota", ""),
+                eds.append({"edicion": e["edicion"], "nombre": e.get("nombre", ""), "nota": e.get("nota", ""),
                             "archivos": [{"id": a["id"], "idioma": a.get("idioma") or "sin confirmar",
                                           "formato": a["formato"], "mb": a["mb"]} for a in archivos]})
         if eds:
             salida.append({"catalogo": c["id"], "titulo": c["titulo"], "tipo": c["tipo"],
-                           "describe": c.get("describe", ""), "ediciones": eds})
+                           "describe": c.get("describe", ""), "ediciones": eds,
+                           "elegir_edicion": bool(c.get("elegir_edicion"))})
     return salida
 
 
@@ -205,6 +209,11 @@ def resumen_para_prompt():
         if c.get("solo_si_lo_piden"):
             lineas.append(f"- {c['titulo']} ({c['tipo']}, {eds[0]['edicion']}): antiguo; "
                           "ofrécelo SOLO si lo piden por su nombre.")
+            continue
+        if c.get("elegir_edicion"):
+            nombres = ", ".join(f"{e['edicion']}" + (f" ({e['nombre']})" if e.get("nombre") else "") for e in eds)
+            lineas.append(f"- {c['titulo']} ({c['tipo']}): NO des solo la última; enseña las ediciones por su "
+                          f"nombre y que elija: {nombres}.")
             continue
         idiomas = sorted({a.get("idioma") for a in eds[0]["archivos"] if a.get("idioma")})
         lineas.append(f"- {c['titulo']} ({c['tipo']}): última edición {eds[0]['edicion']}"
@@ -246,6 +255,8 @@ HERRAMIENTA = {
             "edicion": {"type": "string", "description": "Año de la edición, p. ej. '2027'"},
             "idioma": {"type": "string", "description": "castellano, inglés, francés, polaco, portugués..."},
             "formato": {"type": "string", "enum": ["baja", "pantalla", "pliegos", "pliegos baja", "alta"]},
+            "nombre": {"type": "string", "description": "Nombre o apodo de la edición si la carpeta o el "
+                                                        "archivo lo tiene, p. ej. 'Lucas' en 'Magazine2020 (Lucas)'"},
             "nota": {"type": "string", "description": "Opcional: algo útil sobre la edición"},
             "motivo": {"type": "string", "description": "Por qué lo decides, en una frase"},
         },
@@ -260,7 +271,7 @@ def _contexto(d):
         eds = ediciones(c)
         ejemplo = eds[0]["archivos"][0]["nombre"] if eds else ""
         lineas.append(f"- id {c['id']}: {c['titulo']} ({c['tipo']}). {c.get('describe', '')} Ediciones: "
-                      + ", ".join(str(e["edicion"]) for e in eds) + f". Ejemplo de archivo: {ejemplo}")
+                      + ", ".join(str(e["edicion"]) + (f" ({e['nombre']})" if e.get("nombre") else "") for e in eds) + f". Ejemplo de archivo: {ejemplo}")
     return "\n".join(lineas)
 
 
@@ -319,8 +330,9 @@ def aplicar(d, a, dec):
     e = next((x for x in c["ediciones"] if str(x["edicion"]) == edicion), None)
     if not e:
         e = {"edicion": edicion, "archivos": []}
-        if dec.get("nota"):
-            e["nota"] = dec["nota"]
+        for k in ("nombre", "nota"):
+            if dec.get(k):
+                e[k] = dec[k]
         c["ediciones"].append(e)
     e["archivos"].append({"id": a["id"], "nombre": nombre, "idioma": dec.get("idioma") or None,
                           "formato": dec.get("formato") or "baja", "mb": round(a["tamano"] / 1048576, 1),
