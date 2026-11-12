@@ -80,6 +80,8 @@ def buscar(consulta="", idioma=None):
         texto = _norm(" ".join([c["id"], c["titulo"], c["tipo"], c.get("describe", "")] + c.get("palabras", [])))
         if q and not any(p in texto for p in q):
             continue
+        if c.get("solo_si_lo_piden") and not any(p in _norm(" ".join(c.get("palabras", []))) for p in q):
+            continue   # p. ej. el portfolio: solo si lo nombran
         eds = []
         for e in ediciones(c):
             archivos = [a for a in e["archivos"]
@@ -99,6 +101,10 @@ def resumen_para_prompt():
     lineas = []
     for c in datos()["catalogos"]:
         eds = ediciones(c)
+        if c.get("solo_si_lo_piden"):
+            lineas.append(f"- {c['titulo']} ({c['tipo']}, {eds[0]['edicion'] if eds else '-'}): antiguo; "
+                          "ofrécelo SOLO si lo piden por su nombre.")
+            continue
         idiomas = sorted({a.get("idioma") for a in eds[0]["archivos"] if a.get("idioma")}) if eds else []
         lineas.append(f"- {c['titulo']} ({c['tipo']}): última edición {eds[0]['edicion'] if eds else '-'}"
                       f" en {', '.join(idiomas) or '-'}; {len(eds)} ediciones en total.")
