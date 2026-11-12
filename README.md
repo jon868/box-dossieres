@@ -20,6 +20,16 @@ Solo responde en chats privados a quien esté en la lista de permitidos, y salud
    "el segundo"); `/nuevo` empieza de cero. Si la API de Claude falla, el bot hace una búsqueda directa.
    Si pesa más de 50 MB (límite de Telegram para bots) manda un enlace de descarga de Box que caduca en minutos.
 
+## Catálogos, magazine y presentación corporativa
+Además de los dossieres de propuesta, el bot ofrece el material comercial genérico de
+`00.COMPARTIDO / 1. Material Comercial` (catálogos Sanidad, Construcción, Manufacturing y Set TV, el magazine y la
+presentación corporativa). No se indexan solos: están a mano en `catalogos.json`, con cada edición y, dentro, un
+archivo por idioma y formato (`baja` para correo, `pantalla`, `pliegos` para imprenta, `alta`).
+- Si no está claro si piden un dossier o un catálogo, el bot lo pregunta.
+- Por defecto da la última edición en el idioma pedido y en `baja`, y ofrece las anteriores y otros formatos.
+- Al añadir una edición nueva: edita `catalogos.json` y redespliega. `python catalogos.py listar` lo resume y
+  `python catalogos.py comprobar` mira en Box que todos los archivos siguen ahí.
+
 ## 1. Antes de empezar
 - **Bot**: en Telegram, habla con **@BotFather** → `/newbot` → guarda el token.
 - **Tu ID de Telegram**: escríbele a **@userinfobot** y te lo dice (es un número).
@@ -75,6 +85,7 @@ Los administradores son los IDs de `ADMIN_IDS`. Cada búsqueda y descarga queda 
 | `bot.py` | Bot de Telegram: permisos, saludo, búsqueda, descarga e indexado nocturno |
 | `asistente.py` | Claude en el bot: system prompt, herramientas de búsqueda y memoria de la conversación |
 | `uso.py` | Registro de uso, señales implícitas e informes |
+| `catalogos.py` + `catalogos.json` | Catálogos, magazine y presentación: lista mantenida a mano y su búsqueda |
 | `servidor.py` | Publica `indice_dossieres.json` (con contraseña) para el conector de Box |
 
 ## Buscar dossieres desde Claude Team (conector Box_alegria)

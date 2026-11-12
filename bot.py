@@ -25,6 +25,7 @@ load_dotenv()
 
 import asistente  # noqa: E402
 import box  # noqa: E402
+import catalogos  # noqa: E402
 import db  # noqa: E402
 import servidor  # noqa: E402
 import uso  # noqa: E402
@@ -139,7 +140,8 @@ def lista_con_botones(inicio, mensaje, fichas, iid=None):
     lineas, botones = [inicio + e(mensaje)], []
     for i, f in enumerate(fichas, 1):
         fecha = f.get("anio") or (f.get("fecha") or "")[:7]
-        datos = " · ".join(x for x in (f["cliente"], fecha, f["idiomas"]) if x)
+        extra = f"{f['formato_archivo']}, {f['mb']:.0f} MB" if f.get("formato_archivo") else ""
+        datos = " · ".join(x for x in (f["cliente"], fecha, f["idiomas"], extra) if x)
         lineas.append(f"\n<b>{i}. {e(f['titulo'])}</b>\n<i>{e(datos)}</i>")
         # el id de la respuesta va en el botón para saber qué descarga viene de qué respuesta
         datos_boton = f"d:{f['grupo']}:{iid}" if iid else f"d:{f['grupo']}"
@@ -187,6 +189,8 @@ def responder_descarga(con, consulta, u):
     grupo = partes[1]
     if len(partes) > 2 and partes[2].isdigit():
         uso.descarga(con, u["telegram_id"], int(partes[2]), grupo)
+    if grupo.startswith(catalogos.PREFIJO):
+        return descargar_catalogo(con, chat, u, grupo[len(catalogos.PREFIJO):])
     archivos = db.archivos_de(con, grupo)
     if not archivos:
         return enviar(chat, "Ese dossier ya no está en Box.")
@@ -202,6 +206,22 @@ def responder_descarga(con, consulta, u):
     enlace = box.enlace_temporal(a["id"])
     return enviar(chat, f"<b>{e(a['nombre'])}</b> pesa {a['tamano'] / 1048576:.0f} MB y Telegram no deja "
                         f"enviarlo. Descárgalo aquí (el enlace caduca en unos minutos):\n{e(enlace)}{e(nota)}")
+
+
+def descargar_catalogo(con, chat, u, file_id):
+    r = catalogos.archivo(file_id)
+    if not r:
+        return enviar(chat, "Ese catálogo ya no está en la lista.")
+    c, ed, a = r
+    registrar(con, u["telegram_id"], "descargar", f"{a['id']} {a['nombre']}")
+    nota = f"{c['titulo']} · edición {ed['edicion']} · {a.get('idioma') or ''} · {a['formato']}"
+    if a["mb"] * 1048576 <= LIMITE_TG:
+        tg("sendChatAction", chat_id=chat, action="upload_document")
+        return tg("sendDocument", chat_id=chat, caption=nota[:1000],
+                  files={"document": (a["nombre"], box.descargar(a["id"]))})
+    enlace = box.enlace_temporal(a["id"])
+    return enviar(chat, f"<b>{e(a['nombre'])}</b> pesa {a['mb']:.0f} MB y Telegram no deja enviarlo. "
+                        f"Descárgalo aquí (el enlace caduca en unos minutos):\n{e(enlace)}")
 
 
 def atender(con, upd):
@@ -237,10 +257,10 @@ def atender(con, upd):
         asistente.olvidar(de["id"])
         con.execute("UPDATE usuarios SET ultimo_saludo = NULL WHERE telegram_id = ?", (de["id"],))
         u = usuario(con, de["id"])
-        return enviar(chat, saludo(con, u, de) + "Soy el buscador de dossieres de alegria-activity. Dime qué "
+        return enviar(chat, saludo(con, u, de) + "Soy el buscador de dossieres y catálogos de alegria-activity. Dime qué "
                                                  "buscas (cliente, tema, vehículo, tipo de acción) y te enseño los "
                                                  "dossieres y te los envío. Puedes preguntarme como a un compañero.\nEjemplos: "
-                                                 "<i>bibliobús en inglés</i> · <i>algo de salud para colegios en "
+                                                 "<i>catálogo de sanidad en francés</i> · <i>bibliobús en inglés</i> · <i>algo de salud para colegios en "
                                                  "Airstream</i>\nCon /nuevo empiezo una búsqueda desde cero.")
     if texto.split("@")[0].lower() == "/nuevo":
         uso.reinicio(con, de["id"])

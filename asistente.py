@@ -14,6 +14,7 @@ import time
 
 import anthropic
 
+import catalogos
 import db
 
 MODELO = os.getenv("BOT_MODELO", "claude-haiku-5-5")
@@ -25,11 +26,35 @@ SYSTEM_BASE = """Eres el asistente del buscador interno de dossieres de alegria-
 experiencial que hace campañas y exposiciones itinerantes en vehículos (caravanas, furgones, camiones, \
 semirremolques, autobuses, plataformas), stands y unidades móviles para marcas y administraciones públicas.
 
-Hablas por Telegram con compañeros de la agencia (comerciales, producción, diseño) que buscan dossieres \
-comerciales anteriores: para enviarlos a un cliente, inspirarse para una propuesta o recordar qué se hizo.
+Hablas por Telegram con compañeros de la agencia (comerciales, producción, diseño) que buscan dos tipos de \
+documentos:
+- Dossieres de propuesta: los que se hicieron para un cliente o campaña concreta (unos 1.100). Se buscan con \
+buscar_dossieres.
+- Catálogos: material comercial genérico de la agencia, que se pide más que los dossieres. Incluye catálogos \
+por sector (Sanidad, Construcción, Manufacturing, Set TV), el magazine y la presentación corporativa. Cada \
+uno tiene varias ediciones (años) y, en cada edición, versiones por idioma y formato. Se buscan con \
+buscar_catalogos.
+
+Dossier o catálogo:
+- Si la persona dice catálogo, magazine, revista o presentación de la agencia, es un catálogo.
+- Si nombra un cliente, una campaña o "lo que hicimos para...", es un dossier.
+- Si no está claro (p. ej. "pásame lo de sanidad", "algo de construcción para un cliente francés") y hay \
+catálogo de ese tema, pregunta en UNA frase si quiere el catálogo o un dossier de propuesta, sin buscar \
+dossieres todavía (mostrar_dossieres con la pregunta y sin documentos).
+
+Catálogos:
+- Por defecto da la edición más reciente, en el idioma pedido (castellano si no dice) y en formato "baja", \
+que es el que se manda por correo. Di de qué edición es.
+- Si la última edición no está en ese idioma, dilo y da la más reciente que sí lo tenga.
+- Menciona en una frase que hay ediciones anteriores u otros formatos (pantalla, pliegos para imprenta, alta) \
+y que te las pida si las quiere; si las pide, dáselas.
+- En mostrar_dossieres pon los catálogos en "catalogos" con el id del archivo elegido (como mucho 5).
+
+Catálogos que hay ahora:
+{catalogos}
 
 Cómo trabajas:
-1. Interpreta qué busca la persona: cliente o sector, temática, tipo de acción (exposición itinerante, oficina \
+1. Si es un dossier, interpreta qué busca la persona: cliente o sector, temática, tipo de acción (exposición itinerante, oficina \
 móvil, aula, stand, roadshow...), vehículo o soporte, público, idioma o época. Las peticiones suelen ser vagas \
 ("algo de salud para colegios", "lo de los bancos en Francia"): tradúcelas a búsquedas concretas.
 2. Usa buscar_dossieres. Si los resultados no encajan o son pocos, vuelve a buscar con sinónimos, términos más \
@@ -51,12 +76,13 @@ Reglas:
 - Describe lo que dice cada dossier; no opines sobre si un vehículo sigue existiendo o está disponible.
 - Tono cercano y directo, en castellano. Mensajes cortos: se leen en el móvil. Sin saludos (el bot ya saluda), \
 sin markdown ni asteriscos; texto plano.
-- Si te piden algo que no es buscar dossieres, explica brevemente que solo ayudas con eso."""
+- Si te piden algo que no es buscar dossieres o catálogos, explica brevemente que solo ayudas con eso."""
 
 
 
 def system_hoy():
-    return SYSTEM_BASE + f"\n\nHoy es {time.strftime('%Y-%m-%d')}."
+    return (SYSTEM_BASE.replace("{catalogos}", catalogos.resumen_para_prompt())
+            + f"\n\nHoy es {time.strftime('%Y-%m-%d')}.")
 
 
 HERRAMIENTAS = [
@@ -83,15 +109,32 @@ HERRAMIENTAS = [
         },
     },
     {
+        "name": "buscar_catalogos",
+        "description": "Busca en los catálogos de la agencia (sector, magazine, presentación corporativa). "
+                       "Devuelve cada catálogo con sus ediciones de la más nueva a la más antigua y, en cada "
+                       "edición, los archivos por idioma y formato con su id.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "consulta": {"type": "string", "description": "Tema o nombre (p. ej. 'sanidad', 'magazine', "
+                                                              "'presentación'). Vacío = todos"},
+                "idioma": {"type": "string", "description": "Opcional: solo archivos en ese idioma"},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "mostrar_dossieres",
-        "description": "Respuesta final al usuario: un mensaje y, si hay, los dossieres elegidos (aparecerán con "
-                       "botón de descarga). Llámala siempre para terminar.",
+        "description": "Respuesta final al usuario: un mensaje y, si hay, los dossieres y catálogos elegidos "
+                       "(aparecerán con botón de descarga). Llámala siempre para terminar.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "mensaje": {"type": "string", "description": "Texto para el usuario, breve y en texto plano"},
                 "dossieres": {"type": "array", "items": {"type": "string"}, "maxItems": 5,
                               "description": "IDs ('grupo') de los dossieres recomendados, en orden"},
+                "catalogos": {"type": "array", "items": {"type": "string"}, "maxItems": 5,
+                              "description": "IDs de archivo de los catálogos elegidos (de buscar_catalogos)"},
             },
             "required": ["mensaje", "dossieres"],
         },
@@ -183,7 +226,7 @@ def _ficha_breve(con, f):
 
 def version_prompt():
     """Huella del prompt y las herramientas: cambia sola cuando se edita SYSTEM_BASE o HERRAMIENTAS."""
-    base = SYSTEM_BASE + json.dumps(HERRAMIENTAS, sort_keys=True, ensure_ascii=False)
+    base = SYSTEM_BASE + catalogos.resumen_para_prompt() + json.dumps(HERRAMIENTAS, sort_keys=True, ensure_ascii=False)
     return hashlib.sha1(base.encode()).hexdigest()[:8]
 
 
@@ -218,6 +261,11 @@ def responder(con, uid, pregunta):
         final = next((b for b in usos if b.name == "mostrar_dossieres"), None)
         if final:
             ids = [g for g in final.input.get("dossieres", []) if g in vistos][:5]
+            for fid in (final.input.get("catalogos") or [])[:5]:
+                f = catalogos.ficha(str(fid))   # solo ids que existen en catalogos.json
+                if f:
+                    vistos[f["grupo"]] = f
+                    ids.append(f["grupo"])
             texto = (final.input.get("mensaje") or "").strip()
             _guardar(uid, pregunta, texto + ("\n[Dossieres mostrados: " + "; ".join(
                 f"{vistos[g]['titulo']} ({g})" for g in ids) + "]" if ids else ""))
@@ -243,6 +291,11 @@ def responder(con, uid, pregunta):
                 for f in fichas:
                     vistos[f["grupo"]] = f
                 contenido = json.dumps(fichas, ensure_ascii=False) if fichas else "Sin resultados."
+            elif b.name == "buscar_catalogos":
+                cats = catalogos.buscar(b.input.get("consulta", ""), b.input.get("idioma"))
+                traza["busquedas"].append({"parametros": {"catalogos": True, **b.input}, "n": len(cats),
+                                           "grupos": [c["catalogo"] for c in cats]})
+                contenido = json.dumps(cats, ensure_ascii=False) if cats else "Sin catálogos con eso."
             else:
                 contenido = "Herramienta desconocida."
             resultados.append({"type": "tool_result", "tool_use_id": b.id, "content": contenido})
