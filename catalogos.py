@@ -177,7 +177,7 @@ def buscar(consulta="", idioma=None):
          and p not in ("catalogo", "catalogos", "ultimo", "ultima", "version", "pasame", "manda")]
     salida = []
     for c in datos()["catalogos"]:
-        apodos = [e.get("nombre", "") for e in c["ediciones"]]
+        apodos = [x for e in c["ediciones"] for x in [e.get("nombre", "")] + e.get("alias", [])]
         texto = _norm(" ".join([c["id"], c["titulo"], c["tipo"], c.get("describe", "")] + c.get("palabras", [])
                                + apodos))
         if q and not any(p in texto for p in q):
@@ -190,6 +190,7 @@ def buscar(consulta="", idioma=None):
                         if not idioma or _norm(idioma)[:4] in _norm(a.get("idioma") or "")]
             if archivos:
                 eds.append({"edicion": e["edicion"], "nombre": e.get("nombre", ""), "nota": e.get("nota", ""),
+                            "tambien_llamado": e.get("alias", []),
                             "archivos": [{"id": a["id"], "idioma": a.get("idioma") or "sin confirmar",
                                           "formato": a["formato"], "mb": a["mb"]} for a in archivos]})
         if eds:
