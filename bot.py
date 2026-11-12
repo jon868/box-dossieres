@@ -6,8 +6,10 @@ Bot de Telegram para consultar y descargar dossieres de alegria-activity.
 - Saluda por el nombre que el administrador pone al dar de alta (si no, el nombre de Telegram).
 - Busca en el índice que genera indexar.py y envía el PDF; si pesa más de 50 MB, un enlace temporal de Box.
 - Opcional: relanza el indexador cada noche (AUTO_INDEXAR=true, INDEXAR_HORA=3).
+- Cada noche busca también catálogos nuevos en Material Comercial (AUTO_CATALOGOS, por defecto true) y avisa
+  a los administradores con un botón para deshacer.
 
-Comandos de administración: /permitir <id> <nombre>, /quitar <id>, /usuarios, /informe [días]
+Comandos de administración: /permitir <id> <nombre>, /quitar <id>, /usuarios, /informe [días], /catalogos
 """
 import html
 import os
@@ -37,6 +39,7 @@ LIMITE_TG = 49 * 1024 * 1024          # los bots no pueden enviar archivos de m�
 HORAS_SALUDO = int(os.getenv("HORAS_SALUDO", "6"))
 RESULTADOS = int(os.getenv("RESULTADOS", "5"))
 AUTO_INDEXAR = os.getenv("AUTO_INDEXAR", "false").lower() == "true"
+AUTO_CATALOGOS = os.getenv("AUTO_CATALOGOS", "true").lower() == "true"
 INDEXAR_HORA = int(os.getenv("INDEXAR_HORA", "3"))
 USAR_CLAUDE = os.getenv("USAR_CLAUDE", "true").lower() == "true"   # false: solo búsqueda por palabras
 HILOS = int(os.getenv("HILOS_BOT", "4"))
@@ -128,6 +131,12 @@ def cmd_admin(con, chat, u, texto):
     if orden == "/informe":
         dias = int(partes[1]) if len(partes) > 1 and partes[1].isdigit() else 7
         return enviar(chat, "<pre>" + e(uso.resumen(con, dias)) + "</pre>") or True
+    if orden == "/catalogos":
+        if len(partes) > 1 and partes[1].lower() == "lista":
+            return enviar(chat, "<pre>" + e(catalogos.resumen_para_prompt())[:3900] + "</pre>") or True
+        enviar(chat, "Busco catálogos nuevos en Material Comercial; te aviso al terminar.")
+        threading.Thread(target=revisar_catalogos, args=(chat,), daemon=True).start()
+        return True
     if orden == "/usuarios":
         filas = con.execute("SELECT * FROM usuarios ORDER BY admin DESC, nombre").fetchall()
         lineas = [f"{'⭐ ' if f['admin'] else '• '}{e(f['nombre'] or '(sin nombre)')} · <code>{f['telegram_id']}</code>"
@@ -230,6 +239,8 @@ def atender(con, upd):
         u = usuario(con, q["from"]["id"])
         if not u or q["message"]["chat"]["type"] != "private":
             return tg("answerCallbackQuery", callback_query_id=q["id"], text="Sin acceso")
+        if q.get("data", "").startswith("cx:"):
+            return deshacer_catalogo(q, u)
         try:
             return responder_descarga(con, q, u)
         except Exception as ex:  # noqa: BLE001
@@ -272,17 +283,50 @@ def atender(con, upd):
 
 
 # ---------------------------------------------------------------- indexado nocturno
+def revisar_catalogos(chat=None):
+    """Busca y clasifica catálogos nuevos. Avisa de cada añadido con botón para deshacer; si no hay nada nuevo,
+    solo contesta cuando lo ha pedido alguien (chat)."""
+    destinos = [chat] if chat else list(ADMINS)
+    try:
+        inf = catalogos.actualizar()
+    except Exception as ex:  # noqa: BLE001
+        print(f"Error revisando catálogos: {ex}", flush=True)
+        for d in destinos:
+            enviar(d, f"⚠️ No he podido revisar los catálogos: {e(str(ex)[:300])}")
+        return
+    for d in destinos:
+        for fid, texto in inf["anadidos"]:
+            enviar(d, e(texto), [[{"text": "↩️ Deshacer", "callback_data": f"cx:{fid}"}]])
+        if chat or inf["anadidos"] or inf["quitados"] or inf["errores"]:
+            enviar(d, e(catalogos.texto_informe(inf)))
+
+
+def deshacer_catalogo(q, u):
+    chat = q["message"]["chat"]["id"]
+    if not u["admin"]:
+        return tg("answerCallbackQuery", callback_query_id=q["id"], text="Solo administradores")
+    texto = catalogos.deshacer(q["data"][3:])
+    tg("answerCallbackQuery", callback_query_id=q["id"], text="Deshecho" if texto else "Ya estaba fuera")
+    tg("editMessageReplyMarkup", chat_id=chat, message_id=q["message"]["message_id"],
+       reply_markup={"inline_keyboard": []})
+    return enviar(chat, "↩️ " + e(texto or "Ese archivo ya no estaba en los catálogos."))
+
+
 def indexado_nocturno():
     hecho = None
     while True:
         ahora = datetime.now()
         if ahora.hour == INDEXAR_HORA and hecho != ahora.date():
             hecho = ahora.date()
-            print("Lanzando el indexado nocturno...", flush=True)
-            r = subprocess.run([sys.executable, "indexar.py", "actualizar"], capture_output=True, text=True)
-            (db.DATA / "indexado.log").write_text(r.stdout + r.stderr, encoding="utf-8")
-            if r.returncode:
-                avisar_admins("⚠️ El indexado nocturno de dossieres ha fallado. Mira datos/indexado.log.")
+            if AUTO_INDEXAR:
+                print("Lanzando el indexado nocturno...", flush=True)
+                r = subprocess.run([sys.executable, "indexar.py", "actualizar"], capture_output=True, text=True)
+                (db.DATA / "indexado.log").write_text(r.stdout + r.stderr, encoding="utf-8")
+                if r.returncode:
+                    avisar_admins("⚠️ El indexado nocturno de dossieres ha fallado. Mira datos/indexado.log.")
+            if AUTO_CATALOGOS:
+                print("Revisando catálogos...", flush=True)
+                revisar_catalogos()
         time.sleep(300)
 
 
@@ -306,7 +350,7 @@ def main():
     asegurar_admins(con)
     tg("setMyCommands", commands=[{"command": "start", "description": "Qué puedo hacer"},
                                   {"command": "nuevo", "description": "Empezar una búsqueda desde cero"}])
-    if AUTO_INDEXAR:
+    if AUTO_INDEXAR or AUTO_CATALOGOS:
         threading.Thread(target=indexado_nocturno, daemon=True).start()
     threading.Thread(target=purga_diaria, daemon=True).start()
     if servidor.PASSWORD:   # publica indice_dossieres.json para el conector de Box

@@ -22,13 +22,24 @@ Solo responde en chats privados a quien esté en la lista de permitidos, y salud
 
 ## Catálogos, magazine y presentación corporativa
 Además de los dossieres de propuesta, el bot ofrece el material comercial genérico de
-`00.COMPARTIDO / 1. Material Comercial` (catálogos Sanidad, Construcción, Manufacturing y Set TV, el magazine y la
-presentación corporativa). No se indexan solos: están a mano en `catalogos.json`, con cada edición y, dentro, un
-archivo por idioma y formato (`baja` para correo, `pantalla`, `pliegos` para imprenta, `alta`).
+`00.COMPARTIDO / 1. Material Comercial`: catálogos por sector, el magazine, la presentación corporativa, Set TV,
+fichas de vehículos y el portfolio (este último solo si lo piden por su nombre).
 - Si no está claro si piden un dossier o un catálogo, el bot lo pregunta.
-- Por defecto da la última edición en el idioma pedido y en `baja`, y ofrece las anteriores y otros formatos.
-- Al añadir una edición nueva: edita `catalogos.json` y redespliega. `python catalogos.py listar` lo resume y
-  `python catalogos.py comprobar` mira en Box que todos los archivos siguen ahí.
+- Por defecto da la última edición en el idioma pedido y en `baja` (para correo), y ofrece las anteriores y los
+  otros formatos (`pantalla`, `pliegos` para imprenta, `alta`).
+
+**Se mantiene solo.** El catálogo vive en `datos/catalogos.json`. Cada noche (a `INDEXAR_HORA`, con
+`AUTO_CATALOGOS=true`) el bot recorre Material Comercial:
+1. descarta por regla planos, certificados, PDF de menos de 1 MB y copias exactas de archivos que ya tiene;
+2. a cada PDF nuevo que quede, Claude (Haiku) le lee nombre, ruta y principio del texto y decide si es una edición,
+   idioma o formato nuevo de un catálogo, un catálogo nuevo o algo que no es catálogo;
+3. lo añade y avisa a los administradores por Telegram, uno a uno, con un botón **↩️ Deshacer**;
+4. quita lo que se haya borrado de Box.
+
+Comandos: `/catalogos` lanza la revisión en el momento y `/catalogos lista` enseña el resumen. En la consola:
+`python catalogos.py listar | actualizar | comprobar | deshacer <id>`.
+El `catalogos.json` del repo es la semilla: si se edita a mano y se sube su `version`, al arrancar se le suma al
+catálogo vivo lo que traiga de nuevo (sin borrar lo añadido automáticamente).
 
 ## 1. Antes de empezar
 - **Bot**: en Telegram, habla con **@BotFather** → `/newbot` → guarda el token.
