@@ -42,6 +42,21 @@ Comandos (administradores): `/catalogos` lanza la revisión en el momento, `/cat
 archivo llamado `catalogos.json`: lo valida, guarda copia del anterior y lo sustituye.
 En la consola: `python catalogos.py listar | actualizar | comprobar | deshacer <id> | importar <ruta>`.
 
+## Fotos de campañas
+El bot también busca fotos en el índice de fotos etiquetadas (el `indice.json` de box-etiquetar, el mismo que usa
+`buscar_fotos` en el conector de Box). Se activa con `FOTOS_INDICE_URL` (y `FOTOS_INDICE_USUARIO` /
+`FOTOS_INDICE_PASSWORD`, los mismos valores que `INDICE_URL`, `INDICE_USUARIO` e `INDICE_PASSWORD` del servicio
+`box-mcp`).
+- Claude decide cuándo es una petición de fotos ("fotos del Airstream por dentro", "imágenes de colegios en Bilbao")
+  y busca con `buscar_fotos` (`fotos.py`, misma lógica que el conector: si se cambia allí, cambiarla aquí).
+- Enseña `FOTOS_POR_TANDA` fotos (4) como álbum, con campaña, año y plano debajo. Si no se pide un tipo de plano,
+  mezcla exteriores e interiores (ext, int, ext, int, otro…).
+- Debajo, un botón **📥** por foto que manda el original a tamaño completo y **➕ Más fotos**, que trae la siguiente
+  tanda de la misma búsqueda sin volver a preguntar a Claude. Escribir "más" también funciona.
+- Siempre quita fotos con posibles menores y las no aptas para enseñar a un cliente, y no repite las ya vistas
+  en la conversación (hasta `/nuevo` o una hora sin hablar).
+- Las vistas previas las genera Box (`FOTOS_TAMANO`, 1024 px por defecto); no hace falta tocar el conector.
+
 ## 1. Antes de empezar
 - **Bot**: en Telegram, habla con **@BotFather** → `/newbot` → guarda el token.
 - **Tu ID de Telegram**: escríbele a **@userinfobot** y te lo dice (es un número).
@@ -97,6 +112,7 @@ Los administradores son los IDs de `ADMIN_IDS`. Cada búsqueda y descarga queda 
 | `bot.py` | Bot de Telegram: permisos, saludo, búsqueda, descarga e indexado nocturno |
 | `asistente.py` | Claude en el bot: system prompt, herramientas de búsqueda y memoria de la conversación |
 | `uso.py` | Registro de uso, señales implícitas e informes |
+| `fotos.py` | Fotos de campañas: carga del índice de fotos, búsqueda (mezcla exteriores e interiores) y vistas previas de Box |
 | `catalogos.py` | Catálogos, magazine y presentación: búsqueda, revisión automática e importación (datos en `datos/catalogos.json`) |
 | `servidor.py` | Publica `indice_dossieres.json` e `indice_catalogos.json` (con contraseña) para el conector de Box |
 

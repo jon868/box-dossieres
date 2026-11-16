@@ -1,6 +1,6 @@
 """
 Asistente del bot: Claude interpreta la pregunta, busca en el índice de dossieres (las veces que haga falta)
-y ayuda a la persona a dar con el dossier que necesita.
+y ayuda a la persona a dar con el dossier que necesita. También busca catálogos y fotos de campañas.
 
 Claude solo ve las fichas que devuelve el buscador: no puede recomendar dossieres que no existan.
 Termina siempre con la herramienta mostrar_dossieres (mensaje + dossieres con botón de descarga).
@@ -16,6 +16,7 @@ import anthropic
 
 import catalogos
 import db
+import fotos
 
 MODELO = os.getenv("BOT_MODELO", "claude-haiku-5-5")
 MAX_VUELTAS = int(os.getenv("BOT_MAX_BUSQUEDAS", "4"))
@@ -57,7 +58,7 @@ y que te las pida si las quiere; si las pide, dáselas.
 
 Catálogos que hay ahora:
 {catalogos}
-
+{fotos}
 Cómo trabajas:
 1. Si es un dossier, interpreta qué busca la persona: cliente o sector, temática, tipo de acción (exposición itinerante, oficina \
 móvil, aula, stand, roadshow...), vehículo o soporte, público, idioma o época. Las peticiones suelen ser vagas \
@@ -81,13 +82,40 @@ Reglas:
 - Describe lo que dice cada dossier; no opines sobre si un vehículo sigue existiendo o está disponible.
 - Tono cercano y directo, en castellano. Mensajes cortos: se leen en el móvil. Sin saludos (el bot ya saluda), \
 sin markdown ni asteriscos; texto plano.
-- Si te piden algo que no es buscar dossieres o catálogos, explica brevemente que solo ayudas con eso."""
+- Si te piden algo que no es buscar {que_buscas}, explica brevemente que solo ayudas con eso."""
 
+SECCION_FOTOS = """
+Fotos de campañas:
+- Si piden fotos, imágenes o referencias visuales (de un vehículo, cliente, tema, ciudad, interior o exterior...), \
+busca con buscar_fotos, no con buscar_dossieres. Las fotos están etiquetadas automáticamente: descripción, \
+campaña, año, vehículo, tipo de plano y marca visible.
+- Usa los filtros cuando la petición los diga claramente (vehiculo, plano, cliente, marca, años) y el resto como \
+texto. Si no sale nada, prueba con menos palabras, sinónimos o sin un filtro.
+- Por defecto enseña {n} fotos: pon en "fotos" de mostrar_dossieres los {n} primeros ids de la búsqueda, en ese \
+orden (el buscador ya mezcla exteriores e interiores). Si la persona pide un número, respétalo (máximo 10).
+- No hace falta describir cada foto (debajo de cada una sale campaña, año y plano): en el mensaje di en una \
+frase qué has buscado y cuántas hay en total, y que si quiere más se lo digas o pulse "Más fotos".
+- Si piden "más" de las mismas fotos, repite buscar_fotos con los mismos parámetros: el buscador ya quita las \
+que ha visto esa persona.
+- Las etiquetas son automáticas y pueden fallar: no afirmes como seguro un detalle que no se pueda comprobar.
+- Solo puedes enseñar fotos que hayan salido en buscar_fotos. Nunca inventes ids.
+"""
+
+
+
+def _system():
+    con_fotos = fotos.activo()
+    return (SYSTEM_BASE.replace("{fotos}", SECCION_FOTOS.replace("{n}", str(fotos.POR_TANDA)) if con_fotos else "")
+            .replace("{que_buscas}", "dossieres, catálogos o fotos" if con_fotos else "dossieres o catálogos"))
 
 
 def system_hoy():
-    return (SYSTEM_BASE.replace("{catalogos}", catalogos.resumen_para_prompt())
+    return (_system().replace("{catalogos}", catalogos.resumen_para_prompt())
             + f"\n\nHoy es {time.strftime('%Y-%m-%d')}.")
+
+
+def herramientas():
+    return HERRAMIENTAS if fotos.activo() else [h for h in HERRAMIENTAS if h["name"] != "buscar_fotos"]
 
 
 HERRAMIENTAS = [
@@ -129,6 +157,31 @@ HERRAMIENTAS = [
         },
     },
     {
+        "name": "buscar_fotos",
+        "description": "Busca en el índice de fotos etiquetadas de campañas de la agencia (fotos de Box). Combina "
+                       "texto libre con filtros. Ya quita fotos con posibles menores, fotos no aptas para un cliente "
+                       "y las que esta persona ya ha visto. Sin filtro de plano, mezcla exteriores e interiores. "
+                       "Devuelve el total disponible y las primeras fotos con su id.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "texto": {"type": "string", "description": "Palabras a buscar (p. ej. 'pantallas realidad "
+                                                           "virtual', 'Bilbao', 'colegio')"},
+                "vehiculo": {"type": "string", "enum": fotos.FLOTA,
+                             "description": "Vehículo de la flota (en la foto o asignado a su campaña)"},
+                "plano": {"type": "string", "enum": fotos.PLANOS,
+                          "description": "Solo si piden expresamente un tipo de plano (p. ej. solo interiores)"},
+                "linea": {"type": "string", "enum": fotos.LINEAS, "description": "Línea de servicio"},
+                "cliente": {"type": "string", "description": "Cliente o campaña (parte del nombre)"},
+                "marca": {"type": "string", "description": "Marca visible en la foto"},
+                "anio_desde": {"type": "integer"},
+                "anio_hasta": {"type": "integer"},
+                "limite": {"type": "integer", "description": "Cuántas devolver (por defecto 10)"},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "mostrar_dossieres",
         "description": "Respuesta final al usuario: un mensaje y, si hay, los dossieres y catálogos elegidos "
                        "(aparecerán con botón de descarga). Llámala siempre para terminar.",
@@ -140,6 +193,8 @@ HERRAMIENTAS = [
                               "description": "IDs ('grupo') de los dossieres recomendados, en orden"},
                 "catalogos": {"type": "array", "items": {"type": "string"}, "maxItems": 5,
                               "description": "IDs de archivo de los catálogos elegidos (de buscar_catalogos)"},
+                "fotos": {"type": "array", "items": {"type": "string"}, "maxItems": 10,
+                          "description": "IDs de las fotos a enseñar (de buscar_fotos), en orden"},
             },
             "required": ["mensaje", "dossieres"],
         },
@@ -149,6 +204,7 @@ HERRAMIENTAS[-1]["cache_control"] = {"type": "ephemeral"}
 
 _cliente = None
 _memoria = {}          # telegram_id -> {"t": timestamp, "mensajes": [...]}
+_fotos = {}            # telegram_id -> {"t": timestamp, "vistas": set(ids), "busqueda": parámetros de la última}
 _cerrojo = threading.Lock()
 
 
@@ -162,6 +218,42 @@ def cliente():
 def olvidar(uid):
     with _cerrojo:
         _memoria.pop(uid, None)
+        _fotos.pop(uid, None)
+
+
+def _estado_fotos(uid):
+    """Fotos ya enseñadas y última búsqueda de fotos de esta persona (caduca como la conversación)."""
+    with _cerrojo:
+        m = _fotos.get(uid)
+        if not m or time.time() - m["t"] > MINUTOS_MEMORIA * 60:
+            m = _fotos[uid] = {"t": time.time(), "vistas": set(), "busqueda": None}
+        return m
+
+
+def _buscar_fotos(uid, a, limite=None):
+    est = _estado_fotos(uid)
+    params = {k: a.get(k) for k in ("texto", "vehiculo", "plano", "linea", "cliente", "marca", "anio_desde",
+                                    "anio_hasta") if a.get(k)}
+    pagina, total = fotos.buscar(**params, limite=limite or a.get("limite") or 10, excluir=est["vistas"])
+    est["busqueda"] = params
+    return pagina, total
+
+
+def marcar_fotos_vistas(uid, ids):
+    est = _estado_fotos(uid)
+    est["vistas"].update(str(i) for i in ids)
+    est["t"] = time.time()
+
+
+def mas_fotos(uid):
+    """Siguiente tanda de la última búsqueda de fotos (botón "Más fotos"), sin pasar por Claude.
+    Devuelve (fotos, quedan) o (None, 0) si no hay búsqueda reciente."""
+    est = _estado_fotos(uid)
+    if not est["busqueda"]:
+        return None, 0
+    pagina, total = fotos.buscar(**est["busqueda"], limite=fotos.POR_TANDA, excluir=est["vistas"])
+    marcar_fotos_vistas(uid, [f["id"] for f in pagina])
+    return pagina, total - len(pagina)
 
 
 def _historial(uid):
@@ -231,7 +323,7 @@ def _ficha_breve(con, f):
 
 def version_prompt():
     """Huella del prompt y las herramientas: cambia sola cuando se edita SYSTEM_BASE o HERRAMIENTAS."""
-    base = SYSTEM_BASE + catalogos.resumen_para_prompt() + json.dumps(HERRAMIENTAS, sort_keys=True, ensure_ascii=False)
+    base = _system() + catalogos.resumen_para_prompt() + json.dumps(herramientas(), sort_keys=True, ensure_ascii=False)
     return hashlib.sha1(base.encode()).hexdigest()[:8]
 
 
@@ -241,6 +333,7 @@ def responder(con, uid, pregunta):
     historial = _historial(uid)
     mensajes = historial + [{"role": "user", "content": pregunta}]
     vistos = {}
+    fotos_vistas = {}   # id -> foto, de las búsquedas de esta pregunta
     traza = {"via": "claude", "modelo": MODELO, "version_prompt": version_prompt(),
              "turnos_previos": len(historial) // 2, "busquedas": [], "vueltas": 0,
              "uso": {"entrada": 0, "salida": 0, "cache": 0}}
@@ -253,7 +346,7 @@ def responder(con, uid, pregunta):
         r = cliente().messages.create(
             model=MODELO, max_tokens=1200,
             system=[{"type": "text", "text": system_hoy(), "cache_control": {"type": "ephemeral"}}],
-            tools=HERRAMIENTAS,
+            tools=herramientas(),
             tool_choice={"type": "auto"},   # "auto": algunos modelos no aceptan forzar la herramienta
             messages=mensajes,
         )
@@ -271,10 +364,18 @@ def responder(con, uid, pregunta):
                 if f:
                     vistos[f["grupo"]] = f
                     ids.append(f["grupo"])
+            elegidas = [fotos_vistas[str(i)] for i in (final.input.get("fotos") or []) if str(i) in fotos_vistas]
+            elegidas = list({str(f["id"]): f for f in elegidas}.values())[:10]
+            traza["fotos"] = elegidas
+            if elegidas:
+                marcar_fotos_vistas(uid, [f["id"] for f in elegidas])
+                traza["fotos_quedan"] = max(0, traza.get("fotos_total", 0) - len(elegidas))
             texto = (final.input.get("mensaje") or "").strip()
             _guardar(uid, pregunta, texto + ("\n[Dossieres mostrados: " + "; ".join(
-                f"{vistos[g]['titulo']} ({g})" for g in ids) + "]" if ids else ""))
-            desenlace = ("recomendacion" if ids else
+                f"{vistos[g]['titulo']} ({g})" for g in ids) + "]" if ids else "") + (
+                f"\n[Fotos mostradas: {len(elegidas)}; búsqueda {json.dumps(_estado_fotos(uid)['busqueda'], ensure_ascii=False)}]"
+                if elegidas else ""))
+            desenlace = ("recomendacion" if ids or elegidas else
                          "pregunta" if texto.rstrip().endswith("?") else "sin_resultados")
             return cerrar(texto, [vistos[g] for g in ids], desenlace)
         if not usos:   # respondió con texto sin herramienta
@@ -296,6 +397,15 @@ def responder(con, uid, pregunta):
                 for f in fichas:
                     vistos[f["grupo"]] = f
                 contenido = json.dumps(fichas, ensure_ascii=False) if fichas else "Sin resultados."
+            elif b.name == "buscar_fotos":
+                pagina, total = _buscar_fotos(uid, b.input)
+                traza["busquedas"].append({"parametros": {"fotos": True, **b.input}, "n": total,
+                                           "grupos": [str(f["id"]) for f in pagina]})
+                traza["fotos_total"] = total
+                for f in pagina:
+                    fotos_vistas[str(f["id"])] = f
+                contenido = (json.dumps({"total": total, "fotos": [fotos.ficha(f) for f in pagina]},
+                                        ensure_ascii=False) if pagina else "Sin fotos con eso.")
             elif b.name == "buscar_catalogos":
                 cats = catalogos.buscar(b.input.get("consulta", ""), b.input.get("idioma"))
                 traza["busquedas"].append({"parametros": {"catalogos": True, **b.input}, "n": len(cats),
