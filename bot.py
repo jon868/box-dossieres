@@ -5,6 +5,8 @@ Bot de Telegram para consultar y descargar dossieres de alegria-activity.
 - Solo chats privados y solo usuarios de la lista de permitidos (por ID numérico de Telegram).
 - Saluda por el nombre que el administrador pone al dar de alta (si no, el nombre de Telegram).
 - Busca en el índice que genera indexar.py y envía el PDF; si pesa más de 50 MB, un enlace temporal de Box.
+- Busca fotos de campañas en el índice de fotos etiquetadas (FOTOS_INDICE_URL): enseña unas pocas (4 por
+  defecto, mezclando exteriores e interiores), con botón para descargar el original y otro para ver más.
 - Opcional: relanza el indexador cada noche (AUTO_INDEXAR=true, INDEXAR_HORA=3).
 - Cada noche busca también catálogos nuevos en Material Comercial (AUTO_CATALOGOS, por defecto true) y avisa
   a los administradores con un botón para deshacer.
@@ -12,6 +14,7 @@ Bot de Telegram para consultar y descargar dossieres de alegria-activity.
 Comandos de administración: /permitir <id> <nombre>, /quitar <id>, /usuarios, /informe [días], /catalogos
 """
 import html
+import json
 import os
 import subprocess
 import sys
@@ -29,6 +32,7 @@ import asistente  # noqa: E402
 import box  # noqa: E402
 import catalogos  # noqa: E402
 import db  # noqa: E402
+import fotos  # noqa: E402
 import servidor  # noqa: E402
 import uso  # noqa: E402
 
@@ -162,6 +166,77 @@ def lista_con_botones(inicio, mensaje, fichas, iid=None):
     return "\n".join(lineas)[:4000], botones
 
 
+def enviar_fotos(chat, lista, iid=None, quedan=0, desde=1):
+    """Álbum con las vistas previas de Box y, debajo, botones para descargar cada original y para ver más."""
+    if not lista:
+        return None
+    tg("sendChatAction", chat_id=chat, action="upload_photo")
+    with ThreadPoolExecutor(4) as p:
+        previas = list(p.map(lambda f: _previa_segura(f["id"]), lista))
+    album, archivos, botones = [], {}, []
+    for n, (f, img) in enumerate(zip(lista, previas), desde):
+        if img:
+            clave = f"f{n}"
+            archivos[clave] = (f"{clave}.jpg", img, "image/jpeg")
+            album.append({"type": "photo", "media": f"attach://{clave}", "caption": fotos.pie(f, n)[:1000]})
+        sufijo = f":{iid}" if iid else ""
+        botones.append({"text": f"📥 {n}", "callback_data": f"fo:{f['id']}{sufijo}"})
+    if len(album) == 1:
+        tg("sendPhoto", chat_id=chat, caption=album[0]["caption"], files={"photo": archivos[next(iter(archivos))]})
+    elif album:
+        tg("sendMediaGroup", chat_id=chat, media=json.dumps(album, ensure_ascii=False), files=archivos)
+    filas = [botones[i:i + 5] for i in range(0, len(botones), 5)]
+    if quedan:
+        filas.append([{"text": f"➕ Más fotos (quedan {quedan})", "callback_data": f"mf:{desde + len(lista)}"}])
+    sin_previa = len(lista) - len(album)
+    aviso = f" ({sin_previa} sin vista previa en Box)" if sin_previa else ""
+    return enviar(chat, f"Descarga el original de la que quieras{aviso}:", filas)
+
+
+def _previa_segura(fid):
+    try:
+        return fotos.previa(fid)
+    except Exception as ex:  # noqa: BLE001
+        print(f"Sin vista previa de {fid}: {ex}", flush=True)
+        return None
+
+
+def responder_mas_fotos(con, q, u):
+    chat = q["message"]["chat"]["id"]
+    tg("answerCallbackQuery", callback_query_id=q["id"], text="Buscando más fotos...")
+    tg("editMessageReplyMarkup", chat_id=chat, message_id=q["message"]["message_id"],   # quita el botón usado
+       reply_markup={"inline_keyboard": [fila for fila in q["message"]["reply_markup"]["inline_keyboard"]
+                                         if not fila[0]["callback_data"].startswith("mf:")]})
+    lista, quedan = asistente.mas_fotos(u["telegram_id"])
+    if lista is None:
+        return enviar(chat, "Esa búsqueda ya ha caducado. Dime otra vez qué fotos buscas.")
+    if not lista:
+        return enviar(chat, "No quedan más fotos de esa búsqueda. Prueba con otras palabras.")
+    registrar(con, u["telegram_id"], "mas_fotos", ",".join(str(f["id"]) for f in lista))
+    desde = int(q["data"][3:]) if q["data"][3:].isdigit() else 1
+    return enviar_fotos(chat, lista, None, quedan, desde)
+
+
+def descargar_foto(con, q, u):
+    chat = q["message"]["chat"]["id"]
+    tg("answerCallbackQuery", callback_query_id=q["id"], text="Preparando la foto...")
+    partes = q["data"].split(":")
+    fid = partes[1]
+    f = fotos.foto(fid)
+    if not f:
+        return enviar(chat, "Esa foto ya no está en el índice.")
+    if len(partes) > 2 and partes[2].isdigit():
+        uso.descarga(con, u["telegram_id"], int(partes[2]), f"foto:{fid}")
+    registrar(con, u["telegram_id"], "descargar_foto", f"{fid} {f.get('nombre', '')}")
+    tg("sendChatAction", chat_id=chat, action="upload_document")
+    datos = box.descargar(fid)
+    if len(datos) <= LIMITE_TG:
+        return tg("sendDocument", chat_id=chat, caption=fotos.pie(f)[:1000],
+                  files={"document": (f.get("nombre") or f"{fid}.jpg", datos)})
+    return enviar(chat, f"<b>{e(f.get('nombre'))}</b> pesa demasiado para Telegram. Descárgala aquí (el enlace "
+                        f"caduca en unos minutos):\n{e(box.enlace_temporal(fid))}")
+
+
 def responder_busqueda(con, chat, u, de, texto):
     uid = u["telegram_id"]
     inicio = saludo(con, u, de)
@@ -179,8 +254,12 @@ def responder_busqueda(con, chat, u, de, texto):
         if respuesta:
             mensaje, fichas, traza = respuesta
             traza["ms"] = round((time.time() - t0) * 1000)
+            elegidas = traza.pop("fotos", [])
             iid = uso.guardar(con, uid, texto, traza, mensaje, fichas)
-            return enviar(chat, *lista_con_botones(inicio, mensaje, fichas, iid))
+            enviado = enviar(chat, *lista_con_botones(inicio, mensaje, fichas, iid))
+            if elegidas:
+                enviar_fotos(chat, elegidas, iid, traza.get("fotos_quedan", 0))
+            return enviado
     resultados = db.buscar(con, texto, RESULTADOS)
     traza.update(ms=round((time.time() - t0) * 1000),
                  desenlace="recomendacion" if resultados else "sin_resultados",
@@ -246,6 +325,10 @@ def atender(con, upd):
         if q.get("data", "").startswith("cx:"):
             return deshacer_catalogo(q, u)
         try:
+            if q.get("data", "").startswith("mf:"):
+                return responder_mas_fotos(con, q, u)
+            if q.get("data", "").startswith("fo:"):
+                return descargar_foto(con, q, u)
             return responder_descarga(con, q, u)
         except Exception as ex:  # noqa: BLE001
             print(f"Error en descarga: {ex}", flush=True)
@@ -276,11 +359,15 @@ def atender(con, upd):
         asistente.olvidar(de["id"])
         con.execute("UPDATE usuarios SET ultimo_saludo = NULL WHERE telegram_id = ?", (de["id"],))
         u = usuario(con, de["id"])
-        return enviar(chat, saludo(con, u, de) + "Soy el buscador de dossieres y catálogos de alegria-activity. Dime qué "
-                                                 "buscas (cliente, tema, vehículo, tipo de acción) y te enseño los "
-                                                 "dossieres y te los envío. Puedes preguntarme como a un compañero.\nEjemplos: "
+        return enviar(chat, saludo(con, u, de) + "Soy el buscador de dossieres, catálogos"
+                                                 + (" y fotos" if fotos.activo() else "") +
+                                                 " de alegria-activity. Dime qué "
+                                                 "buscas (cliente, tema, vehículo, tipo de acción) y te lo enseño "
+                                                 "y te lo envío. Puedes preguntarme como a un compañero.\nEjemplos: "
                                                  "<i>catálogo de sanidad en francés</i> · <i>bibliobús en inglés</i> · <i>algo de salud para colegios en "
-                                                 "Airstream</i>\nCon /nuevo empiezo una búsqueda desde cero.")
+                                                 "Airstream</i>"
+                                                 + (" · <i>fotos del Airstream por dentro</i>" if fotos.activo() else "")
+                                                 + "\nCon /nuevo empiezo una búsqueda desde cero.")
     if texto.split("@")[0].lower() == "/nuevo":
         uso.reinicio(con, de["id"])
         asistente.olvidar(de["id"])
